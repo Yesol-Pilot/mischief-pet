@@ -106,7 +106,7 @@ jobs:
           const target=path.resolve(process.argv[2]),out=path.resolve(process.argv[3]),locale=process.argv[4],wallpaper=path.resolve(process.argv[5]);
           if(!['en','ko'].includes(locale))throw Error('Locale must be en or ko');fs.mkdirSync(out,{recursive:true});
           const profile=fs.mkdtempSync(path.join(os.tmpdir(),'mischief-store-'));
-          const receipt={version:'0.5.0',locale,platform:process.platform,arch:process.arch,display:process.env.DISPLAY,resolution:'1920x1080',target,profile,commands:[],screenshots:[],limitations:['Real Linux x64 app on GitHub-hosted Ubuntu Xvfb, not Windows/macOS captures.','--no-sandbox headless QA; no app source, DOM, entitlement or renderer state is mocked.']};
+          const receipt={version:null,locale,platform:process.platform,arch:process.arch,display:process.env.DISPLAY,resolution:'1920x1080',target,profile,commands:[],screenshots:[],limitations:['Real Linux x64 app on GitHub-hosted Ubuntu Xvfb, not Windows/macOS captures.','--no-sandbox headless QA; no app source, DOM, entitlement or renderer state is mocked.']};
           let app,compositor,manager;
           const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           function command(bin,args){const p=spawnSync(bin,args,{encoding:'utf8'});receipt.commands.push({command:[bin,...args],exit_code:p.status,stdout:p.stdout,stderr:p.stderr});if(p.status!==0)throw Error(`${bin}: ${p.stderr}`);return p.stdout;}
@@ -119,6 +119,7 @@ jobs:
            const env={...process.env,LANG:'en_US.UTF-8',LC_ALL:'C.UTF-8',XDG_CURRENT_DESKTOP:'GNOME'};delete env.ELECTRON_RUN_AS_NODE;
            const args=['--no-sandbox','--ozone-platform=x11','--password-store=gnome-libsecret','--user-data-dir='+profile];receipt.launch={command:[target,...args]};
            app=await _electron.launch({executablePath:target,args,chromiumSandbox:false,env,timeout:60000});await app.firstWindow();
+           receipt.version=await app.evaluate(({app})=>app.getVersion());
            receipt.storage=await app.evaluate(({safeStorage})=>({available:safeStorage.isEncryptionAvailable(),backend:safeStorage.getSelectedStorageBackend()}));assert.equal(receipt.storage.available,true,'Real secure storage is required for a normal Plus view');
            const deadline=Date.now()+30000;let pet;while(Date.now()<deadline){manager=app.windows().find(w=>w.url().endsWith('/index.html'));pet=app.windows().find(w=>w.url().endsWith('/overlay.html'));if(manager&&pet&&await pet.evaluate(()=>MischiefSprite.ready()).catch(()=>false))break;await sleep(100);}assert.ok(manager&&pet);await show();
            await manager.locator('#tab-settings').click();await manager.locator('#language').selectOption(locale);await manager.waitForFunction(locale=>document.documentElement.lang===locale,locale);
