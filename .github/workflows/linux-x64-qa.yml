@@ -150,16 +150,18 @@ jobs:
           convert -size 1920x1080 radial-gradient:'#F6F2E9-#AECBD4' "$RUNNER_TEMP/qa-artifacts/wallpaper.png"
           identify "$RUNNER_TEMP/qa-artifacts/wallpaper.png" | tee "$RUNNER_TEMP/qa-artifacts/wallpaper-generation.txt"
           printf '%s\n' "convert -size 1920x1080 radial-gradient:'#F6F2E9-#AECBD4' wallpaper.png" >> "$RUNNER_TEMP/qa-artifacts/wallpaper-generation.txt"
+          cat > "$RUNNER_TEMP/qa-tools/capture-session.sh" <<'CAPTURE_SESSION'
+          set -euo pipefail
+          openbox --config "$RUNNER_TEMP/qa-tools/openbox.xml" & wm=$!
+          trap "kill $wm 2>/dev/null || true" EXIT
+          sleep 1
+          for locale in en ko; do
+            node "$RUNNER_TEMP/qa-tools/screenshots-store.cjs" "$RUNNER_TEMP/qa-release/MischiefPet-linux-x64/MischiefPet" "$RUNNER_TEMP/qa-artifacts/screenshots-store/$locale" "$locale" "$RUNNER_TEMP/qa-artifacts/wallpaper.png" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/store-$locale.log"
+          done
+          CAPTURE_SESSION
           dbus-run-session -- bash -euo pipefail -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            xvfb-run -a -s "-screen 0 1920x1080x24 -nolisten tcp" bash -euo pipefail -c '''
-              openbox --config "$RUNNER_TEMP/qa-tools/openbox.xml" & wm=$!
-              trap "kill $wm 2>/dev/null || true" EXIT
-              sleep 1
-              for locale in en ko; do
-                node "$RUNNER_TEMP/qa-tools/screenshots-store.cjs" "$RUNNER_TEMP/qa-release/MischiefPet-linux-x64/MischiefPet" "$RUNNER_TEMP/qa-artifacts/screenshots-store/$locale" "$locale" "$RUNNER_TEMP/qa-artifacts/wallpaper.png" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/store-$locale.log"
-              done
-            '''
+            xvfb-run -a -s "-screen 0 1920x1080x24 -nolisten tcp" bash "$RUNNER_TEMP/qa-tools/capture-session.sh"
           '
       - name: Upload QA evidence only (never publish)
         if: always()
