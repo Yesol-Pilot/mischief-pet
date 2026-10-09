@@ -106,7 +106,7 @@ jobs:
               projectDir: project, prepackaged: input, targets: Platform.LINUX.createTarget('deb', Arch[arch]),
               config: {
                 productName: 'Mischief Pet', electronVersion: '43.7.7', directories: { output },
-                linux: { executableName: 'MischiefPet', icon, category: 'Utility', desktop: { entry: { Categories: 'Utility;Amusement;', Comment: 'A playful desktop companion' } } },
+                linux: { executableName: 'MischiefPet', icon, category: 'Utility;Amusement' },
                 deb: { packageName: 'mischief-pet', maintainer: 'Neo Genesis <help@neogenesis.app>', vendor: 'Neo Genesis', packageCategory: 'utils', afterInstall: postinstall, artifactName: `mischief-pet_${metadata.version}_${debianArch}.deb` }
               }
             });
@@ -242,6 +242,8 @@ jobs:
           sudo apt-get install -y "$RUNNER_TEMP/qa-artifacts/packages/mischief-pet_0.5.0_amd64.deb" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/install.log"
           { stat -c '%U:%G %a %n' '/opt/Mischief Pet/chrome-sandbox'; cat /etc/apparmor.d/MischiefPet; sudo aa-status; cat /usr/share/applications/MischiefPet.desktop; sysctl kernel.apparmor_restrict_unprivileged_userns; } | tee "$RUNNER_TEMP/qa-artifacts/installed-policy.txt"
           test "$(stat -c '%u:%g:%a' '/opt/Mischief Pet/chrome-sandbox')" = 0:0:4755
+          desktop=$(cat /usr/share/applications/MischiefPet.desktop)
+          [[ "$desktop" == *'Categories=Utility;Amusement;'* ]]
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
       - name: Run native installed x64 app with the Chromium sandbox enabled
         run: |
@@ -300,6 +302,8 @@ jobs:
           sudo apt-get install -y "$RUNNER_TEMP/qa-input/packages/mischief-pet_0.5.0_arm64.deb" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/install.log"
           { stat -c '%U:%G %a %n' '/opt/Mischief Pet/chrome-sandbox'; cat /etc/apparmor.d/MischiefPet; sudo aa-status; cat /usr/share/applications/MischiefPet.desktop; sysctl kernel.apparmor_restrict_unprivileged_userns; } | tee "$RUNNER_TEMP/qa-artifacts/installed-policy.txt"
           test "$(stat -c '%u:%g:%a' '/opt/Mischief Pet/chrome-sandbox')" = 0:0:4755
+          desktop=$(cat /usr/share/applications/MischiefPet.desktop)
+          [[ "$desktop" == *'Categories=Utility;Amusement;'* ]]
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
       - name: Run native installed arm64 app with the Chromium sandbox enabled
         run: |
