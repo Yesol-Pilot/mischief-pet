@@ -1,325 +1,393 @@
-name: Manual Linux Debian sandbox QA
+name: Manual Linux 0.5.1 native Debian QA
+# Authorized operator stages one private draft bundle. This workflow never publishes.
+# Bundle root: prepackaged/MischiefPet-linux-{x64,arm64}, source/{desktop,src,
+# assets,tools,tests,package.json,package-lock.json,index.html,source-freeze.json},
+# old-debs/mischief-pet_0.5.0_{amd64,arm64}.deb, icon.png. No credentials.
+# Only exercised checks can pass. Natural hangs stay separate from disclosed
+# controlled real-kernel SIGALRM drills and mandatory POSIX unit integration.
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Private draft release holding unchanged Linux archives and product icon
+        description: Private draft release holding the QA bundle
         required: true
         type: string
-      asset_x64:
-        description: Original Linux x64 tar.gz asset
+      bundle_asset:
+        description: Exact privately staged QA bundle filename ending in .tar.gz
         required: true
         type: string
-      sha256_x64:
-        description: Expected SHA256 of the x64 archive
-        required: true
-        type: string
-      asset_arm64:
-        description: Original Linux arm64 tar.gz asset
-        required: true
-        type: string
-      sha256_arm64:
-        description: Expected SHA256 of the arm64 archive
-        required: true
-        type: string
-      icon_asset:
-        description: Existing product icon PNG asset
-        required: true
-        type: string
-      icon_sha256:
-        description: Expected SHA256 of the icon
+      bundle_sha256:
+        description: Exact lowercase SHA256 of the QA bundle
         required: true
         type: string
 permissions:
   contents: write
   actions: read
+defaults:
+  run:
+    shell: bash
+env:
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  BUNDLE_ASSET: ${{ inputs.bundle_asset }}
+  BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+  FREEZE_SHA256: cc50690bad5e342ad734fb3a43a0a48fa320ffbf2ab16f4732d873577bdf9285
+  EXPECTED_VERSION: 0.5.1
+  ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+  CI: 'true'
 jobs:
   native-x64:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    outputs:
-      sha256_arm64: ${{ steps.packages.outputs.sha256_arm64 }}
+    timeout-minutes: 45
     env:
-      RELEASE_TAG: ${{ inputs.release_tag }}
-      ASSET_X64: ${{ inputs.asset_x64 }}
-      SHA256_X64: ${{ inputs.sha256_x64 }}
-      ASSET_ARM64: ${{ inputs.asset_arm64 }}
-      SHA256_ARM64: ${{ inputs.sha256_arm64 }}
-      ICON_ASSET: ${{ inputs.icon_asset }}
-      ICON_SHA256: ${{ inputs.icon_sha256 }}
-    steps:
+      NATIVE_ARCH: x64
+      DEBIAN_ARCH: amd64
+      KERNEL_ARCH: x86_64
+    steps: &native-steps
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Prepare restricted-userns native desktop
+      - name: Prepare command receipts and isolated desktop harness
+        id: harness
         run: |
-          mkdir -p "$RUNNER_TEMP/qa-artifacts" "$RUNNER_TEMP/qa-tools" "$RUNNER_TEMP/qa-release"
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb openbox xcompmgr feh imagemagick apparmor libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 libatk-bridge2.0-0t64 libdrm2 libx11-6
-          test "$(uname -m)" = x86_64
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
-          { uname -a; cat /etc/os-release; sysctl kernel.apparmor_restrict_unprivileged_userns; sudo aa-status; } | tee "$RUNNER_TEMP/qa-artifacts/host-policy.txt"
-          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
-      - name: Download private inputs and verify their exact identity
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for asset in "$ASSET_X64" "$ASSET_ARM64" "$ICON_ASSET"; do
-            gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$RUNNER_TEMP/qa-release"
-          done
-          for sha in "$SHA256_X64" "$SHA256_ARM64" "$ICON_SHA256"; do [[ "$sha" =~ ^[a-f0-9]{64}$ ]]; done
-          printf '%s  %s\n' "$SHA256_X64" "$RUNNER_TEMP/qa-release/$ASSET_X64" "$SHA256_ARM64" "$RUNNER_TEMP/qa-release/$ASSET_ARM64" "$ICON_SHA256" "$RUNNER_TEMP/qa-release/$ICON_ASSET" | sha256sum --check | tee "$RUNNER_TEMP/qa-artifacts/input-sha256.txt"
-          tar -xzf "$RUNNER_TEMP/qa-release/$ASSET_X64" -C "$RUNNER_TEMP/qa-release"
-          tar -xzf "$RUNNER_TEMP/qa-release/$ASSET_ARM64" -C "$RUNNER_TEMP/qa-release"
-          printf '%s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_SHA" > "$RUNNER_TEMP/qa-artifacts/run-identity.txt"
-      - name: Prepare generic Debian and sandbox QA helpers
-        run: |
-          npm install --prefix "$RUNNER_TEMP/qa-tools" --no-audit --no-fund electron-builder@26.15.3 playwright@1.63.0
-          cat > "$RUNNER_TEMP/qa-tools/package-linux-deb.cjs" <<'HELPER_PACKAGE_LINUX_DEB_CJS'
+          set -euo pipefail
+          root="$RUNNER_TEMP/mischief-qa"
+          mkdir -p "$root/tools" "$root/evidence/commands" "$root/evidence/packages" "$root/download" "$root/bundle"
+          printf 'QA_ROOT=%s\nQA_TOOLS=%s\nQA_EVIDENCE=%s\nQA_BUNDLE=%s\nQA_SOURCE=%s\n' "$root" "$root/tools" "$root/evidence" "$root/bundle" "$root/bundle/source" >> "$GITHUB_ENV"
+          cat > "$root/tools/record-command.cjs" <<'COMMAND'
           'use strict';
-          // Wrap unchanged prepackaged Electron 0.5.0 bytes in a system-installed Debian package.
-          const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto'), assert = require('node:assert/strict');
-          const { build, Platform, Arch } = require('electron-builder');
-          const input = path.resolve(process.argv[2]), arch = process.argv[3], output = path.resolve(process.argv[4]), icon = path.resolve(process.argv[5]);
-          assert.ok(['x64', 'arm64'].includes(arch), 'Expected x64 or arm64');
-          const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-          (async () => {
-            const asar = await import('@electron/asar');
-            const archive = path.join(input, 'resources/app.asar');
-            const metadata = JSON.parse(asar.extractFile(archive, 'package.json').toString());
-            assert.equal(metadata.version, '0.5.0');
-            assert.ok(fs.existsSync(path.join(input, 'MischiefPet')));
-            const before = sha256(archive), project = path.join(output, 'builder-project-' + arch);
-            // Private mkdtemp staging may be 0700; an installed root-owned app must be traversable.
-            const inputModeBefore = (fs.statSync(input).mode & 0o7777).toString(8);
-            fs.chmodSync(input, 0o755);
-            fs.mkdirSync(project, { recursive: true });
-            fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ ...metadata, homepage: 'https://mischiefpet.neogenesis.app', author: { name: 'Neo Genesis', email: 'help@neogenesis.app' } }, null, 2));
-            const builderRoot = path.dirname(require.resolve('app-builder-lib/package.json'));
-            const defaultPostinstall = fs.readFileSync(path.join(builderRoot, 'templates/linux/after-install.tpl'), 'utf8');
-            // Keep the stock desktop registration and exact-path AppArmor profile loader.
-            // Its root-run unshare probe can select 0755 even when ordinary users are restricted.
-            const postinstall = path.join(project, 'after-install.tpl');
-            fs.writeFileSync(postinstall, defaultPostinstall + '\n# Installed privileged sandbox fallback; never apply this to user-owned tarballs.\nchown root:root \'/opt/${sanitizedProductName}/chrome-sandbox\'\nchmod 4755 \'/opt/${sanitizedProductName}/chrome-sandbox\'\n');
-            const debianArch = arch === 'x64' ? 'amd64' : 'arm64';
-            const result = await build({
-              projectDir: project, prepackaged: input, targets: Platform.LINUX.createTarget('deb', Arch[arch]),
-              config: {
-                productName: 'Mischief Pet', electronVersion: '43.7.7', directories: { output },
-                linux: { executableName: 'MischiefPet', icon, category: 'Utility;Amusement' },
-                deb: { packageName: 'mischief-pet', maintainer: 'Neo Genesis <help@neogenesis.app>', vendor: 'Neo Genesis', packageCategory: 'utils', afterInstall: postinstall, artifactName: `mischief-pet_${metadata.version}_${debianArch}.deb` }
-              }
-            });
-            assert.equal(sha256(archive), before, 'Prepackaged ASAR must remain byte-identical');
-            const files = result.filter(file => file.endsWith('.deb')).map(file => ({ path: file, sha256: sha256(file), bytes: fs.statSync(file).size }));
-            assert.equal(files.length, 1);
-            fs.writeFileSync(path.join(output, `build-${debianArch}.json`), JSON.stringify({ version: metadata.version, arch, input, input_directory_mode_before: inputModeBefore, packaged_directory_mode: '755', asar_sha256_before: before, asar_sha256_after: sha256(archive), electron_builder: require('electron-builder/package.json').version, sandbox_policy: 'Stock AppArmor userns profile and postinst loader; explicit root:root 4755 chrome-sandbox fallback', artifacts: files }, null, 2) + '\n');
-            fs.rmSync(project, { recursive: true, force: true });
-            console.log(JSON.stringify(files, null, 2));
-          })().catch(error => { console.error(error); process.exitCode = 1; });
-          HELPER_PACKAGE_LINUX_DEB_CJS
-          cat > "$RUNNER_TEMP/qa-tools/linux-sandbox-qa.cjs" <<'HELPER_LINUX_SANDBOX_QA_CJS'
-          'use strict';
-          // Explicit installed-package QA. No --no-sandbox flag or Chromium sandbox bypass.
-          const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict'),crypto=require('node:crypto');
-          const {execFileSync}=require('node:child_process'),{_electron}=require('playwright');
-          const target=path.resolve(process.argv[2]),output=path.resolve(process.argv[3]);
-          fs.mkdirSync(output,{recursive:true});
-          const temp=fs.mkdtempSync(path.join(os.tmpdir(),'mischief-sandbox-qa-'));
-          const receipt={started_at:new Date().toISOString(),platform:process.platform,arch:process.arch,target,profile:temp,checks:[],limitations:['GitHub-hosted Ubuntu 24.04 Xvfb with Openbox and xcompmgr; not a physical desktop.','No Wayland, physical input, multimonitor, suspend/resume or extended soak.','Perch capability checked, not an actual perch jump onto another application.','Manager shown with showInactive; no focus() call.'],screenshots:[]};
-          let app,pids=[],crashes=[];
-          const sleep=ms=>new Promise(r=>setTimeout(r,ms)),hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
-          const pass=(name,data)=>receipt.checks.push({name,result:'PASS',data});
-          async function capture(page,name){const file=path.join(output,name);await page.screenshot({path:file,omitBackground:true});receipt.screenshots.push({path:file,bytes:fs.statSync(file).size,sha256:hash(file)});}
-          (async()=>{
-           const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;delete env.ELECTRON_DISABLE_SANDBOX;delete env.CHROME_DEVEL_SANDBOX;
-           app=await _electron.launch({executablePath:target,chromiumSandbox:true,args:['--user-data-dir='+temp],env,timeout:60000});
-           const pid=app.process().pid;receipt.pid=pid;receipt.launch={argv:app.process().spawnargs,chromiumSandbox:true};
-           assert.ok(!receipt.launch.argv.includes('--no-sandbox'));
-           await app.firstWindow();let manager,pet;const deadline=Date.now()+30000;
-           while(Date.now()<deadline){manager=app.windows().find(w=>w.url().endsWith('/index.html'));pet=app.windows().find(w=>w.url().endsWith('/overlay.html'));if(manager&&pet&&await pet.evaluate(()=>MischiefSprite.ready()).catch(()=>false))break;await sleep(100);}
-           assert.ok(manager&&pet,'manager and pet renderer required');await pet.waitForFunction(()=>MischiefSprite.ready());
-           app.on('window',page=>page.on('crash',()=>crashes.push(page.url())));for(const page of app.windows())page.on('crash',()=>crashes.push(page.url()));
-           const ws=await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().map(w=>({url:w.webContents.getURL(),visible:w.isVisible(),focusable:w.isFocusable(),bounds:w.getBounds()})));
-           assert.ok(ws.find(w=>w.url.endsWith('/overlay.html'))?.visible);pass('Process starts and visible pet renderer loads',ws);
-           const initial=await manager.evaluate(()=>petDesktop.getState());
-           assert.equal(initial.capabilities.windowOcclusion,true);assert.equal(initial.state.perch.available,true);pass('Native window-world bridge loads; perch is available',{capabilities:initial.capabilities,perch:initial.state.perch});
-           await capture(pet,'pet.png');
-           await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().endsWith('/index.html')).showInactive());
-           assert.equal(await manager.isVisible('body'),true);await capture(manager,'manager.png');pass('Manager opens without explicit focus',true);
-           const before=(await manager.evaluate(()=>petDesktop.getState())).state.foodCounts.salmon||0;
-           await manager.locator('#food').selectOption('salmon');await manager.locator('#feed-button').click();
-           await manager.waitForFunction(before=>petDesktop.getState().then(s=>(s.state.foodCounts.salmon||0)===before+1),before);
-           pass('Care action via manager UI increments salmon count',{before,after:(await manager.evaluate(()=>petDesktop.getState())).state.foodCounts.salmon});
-           const samples=[];for(let i=0;i<10;i++){samples.push(await pet.evaluate(()=>document.getElementById('pet').toDataURL()));await sleep(180);}
-           assert.ok(new Set(samples).size>1);pass('Pet animation produces changing rendered frames',{distinctFrames:new Set(samples).size,sampleCount:samples.length});
-           await sleep(30000);assert.equal(app.process().exitCode,null);assert.deepEqual(crashes,[]);
-           const final=await manager.evaluate(()=>petDesktop.getState());assert.ok(final.state.time>initial.state.time);pass('Renderer responsive and no crash over 30 seconds',{initialTime:initial.state.time,finalTime:final.state.time,crashes});
-           receipt.sandbox=await app.evaluate(({app})=>{
-            const fs=process.getBuiltinModule('fs');
-            const info=pid=>{const s=fs.readFileSync(`/proc/${pid}/status`,'utf8');return {pid,seccomp:Number(/^Seccomp:\s+(\d+)/m.exec(s)?.[1]),noNewPrivileges:Number(/^NoNewPrivs:\s+(\d+)/m.exec(s)?.[1]),effectiveCapabilities:/^CapEff:\s+(\w+)/m.exec(s)?.[1],pidNamespace:fs.readlinkSync(`/proc/${pid}/ns/pid`)};};
-            return {main:info(process.pid),renderers:app.getAppMetrics().filter(m=>m.type==='Tab').map(m=>({...info(m.pid),sandboxed:m.sandboxed}))};
-           });
-           assert.ok(receipt.sandbox.renderers.length>=2);
-           for(const renderer of receipt.sandbox.renderers){assert.equal(renderer.seccomp,2);assert.equal(renderer.noNewPrivileges,1);assert.match(renderer.effectiveCapabilities,/^0+$/);assert.notEqual(renderer.pidNamespace,receipt.sandbox.main.pidNamespace);}
-           pass('Renderer sandbox has seccomp, no-new-privileges, zero capabilities and isolated PID namespace',receipt.sandbox);
-           const ps=execFileSync('ps',['-eo','pid,ppid,user,args'],{encoding:'utf8'});
-           const rows=ps.trim().split('\n').slice(1).map(line=>{const m=/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);return m&&{pid:Number(m[1]),ppid:Number(m[2]),user:m[3],args:m[4]};}).filter(Boolean);
-           const family=new Set([pid]);let changed=true;while(changed){changed=false;for(const row of rows)if(family.has(row.ppid)&&!family.has(row.pid)){family.add(row.pid);changed=true;}}
-           receipt.processes=rows.filter(row=>family.has(row.pid));assert.ok(receipt.processes.some(row=>row.args.includes('--type=zygote')));assert.ok(receipt.processes.every(row=>!row.args.includes('--no-sandbox')));
-           fs.writeFileSync(path.join(output,'processes.json'),JSON.stringify({command:['ps','-eo','pid,ppid,user,args'],application_processes:receipt.processes},null,2)+'\n');
-           await capture(manager,'manager-after-care.png');
-           const file=path.join(output,'desktop.png'),args=['-display',process.env.DISPLAY,'-window','root',file];execFileSync('import',args);receipt.display_capture={command:['import',...args],path:file,bytes:fs.statSync(file).size,sha256:hash(file)};
-           pids=[...family];await app.close();app=null;await sleep(1500);
-           const leftovers=pids.filter(pid=>{try{process.kill(pid,0);return true;}catch{return false;}});assert.deepEqual(leftovers,[]);pass('Clean exit leaves no application processes',{pids,leftovers});
-           receipt.result='PASS_SANDBOXED';
-          })().catch(e=>{receipt.result='FAIL';receipt.error=e.stack;process.exitCode=1;}).finally(async()=>{
-           if(app)await app.close().catch(()=>{});fs.rmSync(temp,{recursive:true,force:true});receipt.finished_at=new Date().toISOString();
-           fs.writeFileSync(path.join(output,'qa.json'),JSON.stringify(receipt,null,2)+'\n');console.log(JSON.stringify({result:receipt.result,checks:receipt.checks,error:receipt.error},null,2));
-          });
-          HELPER_LINUX_SANDBOX_QA_CJS
-          cat > "$RUNNER_TEMP/qa-tools/linux-sandbox-baseline.cjs" <<'HELPER_LINUX_SANDBOX_BASELINE_CJS'
-          'use strict';
-          // Observe ordinary archive startup before installing any per-app sandbox policy.
-          const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto'),{spawn}=require('node:child_process');
-          const executable=path.resolve(process.argv[2]),output=path.resolve(process.argv[3]);
-          fs.mkdirSync(output,{recursive:true});const profile=fs.mkdtempSync(path.join(os.tmpdir(),'mischief-archive-baseline-'));
-          const args=['--user-data-dir='+profile],env={...process.env};delete env.ELECTRON_RUN_AS_NODE;delete env.ELECTRON_DISABLE_SANDBOX;delete env.CHROME_DEVEL_SANDBOX;
-          const receipt={started_at:new Date().toISOString(),command:[executable,...args],profile,chrome_sandbox_mode:(fs.statSync(path.join(path.dirname(executable),'chrome-sandbox')).mode&0o7777).toString(8),sandbox_bypass:false,observation_seconds:20};
-          const child=spawn(executable,args,{env,detached:true,stdio:['ignore','pipe','pipe']});let text='',timedOut=false;
-          child.stdout.on('data',b=>{text+=b;});child.stderr.on('data',b=>{text+=b;});
-          const stop=()=>{try{process.kill(-child.pid,'SIGTERM');}catch{}};
-          const timer=setTimeout(()=>{timedOut=true;stop();},20000);
-          child.on('error',error=>{receipt.spawn_error=error.message;});
+          const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{spawn}=require('node:child_process');
+          const args=process.argv.slice(2),directory=args.shift(),allowExit1=args[0]==='--allow-exit-1';
+          if(allowExit1)args.shift();
+          if(!args.length)throw Error('Command required');
+          const output=fs.mkdtempSync(path.join(directory,'command-'));
+          const receipt={command:args,cwd:process.cwd(),started_at:new Date().toISOString(),allowed_exit_codes:allowExit1?[0,1]:[0]};
+          const started=performance.now(),child=spawn(args[0],args.slice(1),{stdio:['ignore','pipe','pipe']});
+          let stdout='',stderr='';
+          child.stdout.on('data',b=>{stdout+=b;process.stdout.write(b);});
+          child.stderr.on('data',b=>{stderr+=b;process.stderr.write(b);});
+          child.on('error',e=>{receipt.spawn_error=e.message;});
+          const signals=[];
+          for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{signals.push({signal,at:new Date().toISOString()});child.kill(signal);});
           child.on('close',(code,signal)=>{
-           clearTimeout(timer);stop();receipt.exit_code=code;receipt.signal=signal;receipt.survived_observation=timedOut;receipt.result=timedOut?'ALIVE_20_SECONDS':'EXITED_DURING_STARTUP';receipt.output=text;receipt.finished_at=new Date().toISOString();
-           const log=path.join(output,'baseline.log');fs.writeFileSync(log,text);receipt.log_sha256=crypto.createHash('sha256').update(text).digest('hex');fs.rmSync(profile,{recursive:true,force:true});fs.writeFileSync(path.join(output,'baseline.json'),JSON.stringify(receipt,null,2)+'\n');console.log(JSON.stringify(receipt,null,2));
+            Object.assign(receipt,{exit_code:code,signal,forwarded_signals:signals,elapsed_ms:performance.now()-started,finished_at:new Date().toISOString(),stdout,stderr});
+            for(const [name,text] of [['stdout',stdout],['stderr',stderr]]){
+              fs.writeFileSync(path.join(output,name+'.log'),text);
+              receipt[name+'_sha256']=crypto.createHash('sha256').update(text).digest('hex');
+            }
+            fs.writeFileSync(path.join(output,'command.json'),JSON.stringify(receipt,null,2)+'\n');
+            if(receipt.spawn_error||signals.length||signal)process.exitCode=1;
+            else process.exitCode=code===0||(allowExit1&&code===1)?0:(code===null?1:code);
           });
-          HELPER_LINUX_SANDBOX_BASELINE_CJS
-          cat > "$RUNNER_TEMP/qa-tools/openbox.xml" <<'WM_CONFIG'
+          COMMAND
+          cat > "$root/tools/common.sh" <<'COMMON'
+          set -euo pipefail
+          run() { node "$QA_TOOLS/record-command.cjs" "$QA_EVIDENCE/commands" "$@"; }
+          session() { run xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp' dbus-run-session -- bash "$QA_TOOLS/x11-session.sh" "$@"; }
+          COMMON
+          cat > "$root/tools/openbox.xml" <<'WM'
           <?xml version="1.0"?><openbox_config xmlns="http://openbox.org/3.4/rc"><theme><name>Onyx</name><titleLayout>NLIMC</titleLayout></theme><focus><focusNew>no</focusNew><followMouse>no</followMouse></focus><desktops><number>1</number></desktops></openbox_config>
-          WM_CONFIG
-          cat > "$RUNNER_TEMP/qa-tools/x11-session.sh" <<'X11_SESSION'
+          WM
+          cat > "$root/tools/x11-session.sh" <<'SESSION'
           set -euo pipefail
           ulimit -c 0
-          openbox --config-file "$RUNNER_TEMP/qa-tools/openbox.xml" & wm=$!
+          unset ELECTRON_RUN_AS_NODE ELECTRON_DISABLE_SANDBOX CHROME_DEVEL_SANDBOX
+          openbox --config-file "$QA_TOOLS/openbox.xml" & wm=$!
           xcompmgr -n & compositor=$!
-          trap 'kill "$compositor" "$wm" 2>/dev/null || true' EXIT
+          trap 'kill "$compositor" "$wm" 2>/dev/null || true; wait "$compositor" "$wm" 2>/dev/null || true' EXIT
           sleep 1
-          feh --bg-fill "$RUNNER_TEMP/qa-tools/wallpaper.png"
+          feh --bg-fill "$QA_TOOLS/wallpaper.png"
           "$@"
-          X11_SESSION
-          convert -size 1920x1080 xc:'#E9EFEA' "$RUNNER_TEMP/qa-tools/wallpaper.png"
-      - name: Record ordinary original archive startup without any sandbox bypass
+          SESSION
+          cat > "$root/tools/verify-source.cjs" <<'VERIFY'
+          'use strict';
+          const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),assert=require('node:assert/strict');
+          const root=process.env.QA_SOURCE,file=path.join(root,'source-freeze.json'),rows=[];
+          const hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+          const receipt={result:'FAIL',freeze_sha256:hash(file),expected_freeze_sha256:process.env.FREEZE_SHA256,files:rows};
+          try{
+            assert.equal(receipt.freeze_sha256,process.env.FREEZE_SHA256);
+            const freeze=JSON.parse(fs.readFileSync(file,'utf8'));
+            assert.equal(freeze.version,'0.5.1');
+            assert.ok(Object.keys(freeze.files).length>0);
+            for(const [relative,expected] of Object.entries(freeze.files)){
+              assert.ok(!path.isAbsolute(relative)&&!relative.split(/[\\/]/).includes('..'));
+              const full=path.join(root,relative),actual=hash(full);
+              rows.push({path:relative,expected_sha256:expected,sha256:actual,result:actual===expected?'PASS':'FAIL'});
+              assert.equal(actual,expected,relative);
+            }
+            assert.equal(JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version,'0.5.1');
+            receipt.result='PASS';
+          }catch(e){receipt.error=e.stack;process.exitCode=1;}
+          fs.writeFileSync(path.join(process.env.QA_EVIDENCE,'source-freeze-'+(process.argv[2]||'initial')+'.json'),JSON.stringify(receipt,null,2)+'\n');
+          console.log(JSON.stringify(receipt,null,2));
+          VERIFY
+          cat > "$root/tools/assert-removed.cjs" <<'ABSENT'
+          const fs=require('node:fs'),assert=require('node:assert/strict');
+          const paths=['/opt/mischief-pet/MischiefPet','/opt/Mischief Pet/MischiefPet','/etc/apparmor.d/MischiefPet','/usr/share/applications/MischiefPet.desktop','/etc/alternatives/MischiefPet','/usr/bin/MischiefPet'];
+          const rows=paths.map(file=>{let exists=true;try{fs.lstatSync(file);}catch(e){if(e.code==='ENOENT')exists=false;else throw e;}return {path:file,exists};});
+          console.log(JSON.stringify({removed_paths:rows}));assert.ok(rows.every(r=>!r.exists),'Package integration remains');
+          ABSENT
+          cat > "$root/tools/clean-package.sh" <<'CLEAN'
+          source "$QA_TOOLS/common.sh"
+          status="$(run --allow-exit-1 dpkg-query -W '-f=${Status}\n' mischief-pet)"
+          if [[ "$status" =~ (installed|unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)$ ]]; then
+            run sudo -n env DEBIAN_FRONTEND=noninteractive apt-get remove -y mischief-pet
+          fi
+          run node "$QA_TOOLS/assert-removed.cjs"
+          census="$(run --allow-exit-1 ps -C MischiefPet,chrome_crashpad -o pid=,ppid=,comm=)"
+          test -z "$census"
+          CLEAN
+          cat > "$root/tools/host.cjs" <<'HOST'
+          const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),{execFileSync}=require('node:child_process');
+          const keys=['kernel.apparmor_restrict_unprivileged_userns','kernel.unprivileged_userns_clone'];
+          const receipt={platform:process.platform,node_arch:process.arch,node_version:process.version,kernel_arch:execFileSync('uname',['-m'],{encoding:'utf8'}).trim(),debian_arch:execFileSync('dpkg',['--print-architecture'],{encoding:'utf8'}).trim(),os_release:fs.readFileSync('/etc/os-release','utf8'),sysctls:Object.fromEntries(keys.map(key=>[key,execFileSync('sysctl',['-n',key],{encoding:'utf8'}).trim()]))};
+          fs.writeFileSync(path.join(process.env.QA_EVIDENCE,'host-original.json'),JSON.stringify(receipt,null,2)+'\n');
+          console.log(JSON.stringify(receipt));
+          assert.equal(receipt.platform,'linux');assert.equal(receipt.node_arch,process.env.NATIVE_ARCH);assert.equal(receipt.kernel_arch,process.env.KERNEL_ARCH);assert.equal(receipt.debian_arch,process.env.DEBIAN_ARCH);
+          assert.match(receipt.os_release,/^ID=ubuntu$/m);assert.match(receipt.os_release,/^VERSION_ID="24\.04"$/m);
+          for(const value of Object.values(receipt.sysctls))assert.match(value,/^[01]$/);
+          HOST
+      - name: Capture original native host and install desktop dependencies
+        id: desktop
         run: |
-          xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp' bash "$RUNNER_TEMP/qa-tools/x11-session.sh" node "$RUNNER_TEMP/qa-tools/linux-sandbox-baseline.cjs" "$RUNNER_TEMP/qa-release/MischiefPet-linux-x64/MischiefPet" "$RUNNER_TEMP/qa-artifacts/archive-baseline"
-      - name: Build both Debian architectures sequentially from unchanged prepackaged apps
-        id: packages
-        run: |
-          mkdir -p "$RUNNER_TEMP/qa-artifacts/packages"
-          for arch in x64 arm64; do
-            node "$RUNNER_TEMP/qa-tools/package-linux-deb.cjs" "$RUNNER_TEMP/qa-release/MischiefPet-linux-$arch" "$arch" "$RUNNER_TEMP/qa-artifacts/packages" "$RUNNER_TEMP/qa-release/$ICON_ASSET" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/build-$arch.log"
-          done
-          cp "$RUNNER_TEMP/qa-tools/linux-sandbox-qa.cjs" "$RUNNER_TEMP/qa-tools/openbox.xml" "$RUNNER_TEMP/qa-tools/x11-session.sh" "$RUNNER_TEMP/qa-tools/wallpaper.png" "$RUNNER_TEMP/qa-artifacts/"
-          for arch in amd64 arm64; do
-            package="$RUNNER_TEMP/qa-artifacts/packages/mischief-pet_0.5.0_$arch.deb"
-            mkdir -p "$RUNNER_TEMP/qa-artifacts/control-$arch"
-            dpkg-deb -e "$package" "$RUNNER_TEMP/qa-artifacts/control-$arch"
-            dpkg-deb -I "$package" > "$RUNNER_TEMP/qa-artifacts/package-info-$arch.txt"
-            dpkg-deb -c "$package" > "$RUNNER_TEMP/qa-artifacts/package-files-$arch.txt"
-            sha256sum "$package" >> "$RUNNER_TEMP/qa-artifacts/deb-sha256.txt"
-          done
-          hash=$(sha256sum "$RUNNER_TEMP/qa-artifacts/packages/mischief-pet_0.5.0_arm64.deb")
-          printf 'sha256_arm64=%s\n' "${hash%% *}" >> "$GITHUB_OUTPUT"
-      - name: Transfer installers through the disposable private draft only
+          source "$QA_TOOLS/common.sh"
+          run node "$QA_TOOLS/host.cjs"
+          run sudo -n apt-get update
+          run sudo -n apt-get install -y --no-install-recommends xvfb openbox xcompmgr feh imagemagick dbus-x11 apparmor libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 libatk-bridge2.0-0t64 libdrm2 libx11-6
+          run sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          run sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
+          run sudo -n aa-status
+          run convert -size 1920x1080 xc:'#E9EFEA' "$QA_TOOLS/wallpaper.png"
+          run bash "$QA_TOOLS/clean-package.sh"
+      - name: Download the exact private draft bundle and verify frozen source
+        id: bundle
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          test "$(gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
-          gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" "$RUNNER_TEMP/qa-artifacts/packages/mischief-pet_0.5.0_amd64.deb" "$RUNNER_TEMP/qa-artifacts/packages/mischief-pet_0.5.0_arm64.deb"
-      - name: Install amd64 Debian package and record the actual sandbox policy
+          source "$QA_TOOLS/common.sh"
+          [[ "$BUNDLE_ASSET" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.gz$ ]]
+          [[ "$BUNDLE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          run gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json tagName,isDraft --jq '{tagName: .tagName, isDraft: .isDraft}' > "$QA_EVIDENCE/draft.json"
+          node -e 'const assert=require("node:assert/strict"),r=require(process.argv[1]);assert.equal(r.isDraft,true);assert.equal(r.tagName,process.env.RELEASE_TAG)' "$QA_EVIDENCE/draft.json"
+          run gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "$BUNDLE_ASSET" --dir "$QA_ROOT/download"
+          cat > "$QA_TOOLS/verify-bundle.cjs" <<'BUNDLE'
+          const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),assert=require('node:assert/strict');
+          const file=path.join(process.env.QA_ROOT,'download',process.env.BUNDLE_ASSET),sha=crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+          const receipt={asset:process.env.BUNDLE_ASSET,release_tag:process.env.RELEASE_TAG,sha256:sha,expected_sha256:process.env.BUNDLE_SHA256,bytes:fs.statSync(file).size,result:sha===process.env.BUNDLE_SHA256?'PASS':'FAIL'};
+          fs.writeFileSync(path.join(process.env.QA_EVIDENCE,'bundle-identity.json'),JSON.stringify(receipt,null,2)+'\n');console.log(JSON.stringify(receipt));assert.equal(sha,process.env.BUNDLE_SHA256);
+          BUNDLE
+          run node "$QA_TOOLS/verify-bundle.cjs"
+          run tar -tzf "$QA_ROOT/download/$BUNDLE_ASSET" > "$QA_EVIDENCE/bundle-members.txt"
+          node -e 'const fs=require("node:fs"),assert=require("node:assert/strict");for(const p of fs.readFileSync(process.argv[1],"utf8").trim().split("\n")){assert.ok(!p.startsWith("/")&&!p.split("/").includes(".."),p)}' "$QA_EVIDENCE/bundle-members.txt"
+          run tar --no-same-owner -xzf "$QA_ROOT/download/$BUNDLE_ASSET" -C "$QA_BUNDLE"
+          for arch in x64 arm64; do test -x "$QA_BUNDLE/prepackaged/MischiefPet-linux-$arch/MischiefPet"; test -f "$QA_BUNDLE/prepackaged/MischiefPet-linux-$arch/resources/app.asar"; done
+          for arch in amd64 arm64; do test -f "$QA_BUNDLE/old-debs/mischief-pet_0.5.0_$arch.deb"; done
+          for dir in desktop src assets tools tests; do test -d "$QA_SOURCE/$dir"; done
+          for file in package.json package-lock.json index.html source-freeze.json; do test -f "$QA_SOURCE/$file"; done
+          test -f "$QA_BUNDLE/icon.png"
+          run node "$QA_TOOLS/verify-source.cjs" initial
+          run sha256sum "$QA_SOURCE/tools/package-linux-deb.cjs" "$QA_SOURCE/tools/linux-sandbox-qa.cjs" "$QA_SOURCE/tools/quit-qa-posix.cjs" "$QA_SOURCE/tools/linux-upgrade-suid-qa.cjs" "$QA_SOURCE/tools/qa-posix-inspector.cjs" "$QA_SOURCE/tests/quit-watchdog.test.cjs" > "$QA_EVIDENCE/helper-sha256.txt"
+          printf '%s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_SHA" "$NATIVE_ARCH" > "$QA_EVIDENCE/run-identity.txt"
+      - name: Install frozen dependencies on this native architecture
+        id: dependencies
         run: |
-          sudo apt-get install -y "$RUNNER_TEMP/qa-artifacts/packages/mischief-pet_0.5.0_amd64.deb" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/install.log"
-          { stat -c '%U:%G %a %n' '/opt/Mischief Pet/chrome-sandbox'; cat /etc/apparmor.d/MischiefPet; sudo aa-status; cat /usr/share/applications/MischiefPet.desktop; sysctl kernel.apparmor_restrict_unprivileged_userns; } | tee "$RUNNER_TEMP/qa-artifacts/installed-policy.txt"
-          test "$(stat -c '%u:%g:%a' '/opt/Mischief Pet/chrome-sandbox')" = 0:0:4755
-          desktop=$(cat /usr/share/applications/MischiefPet.desktop)
-          [[ "$desktop" == *'Categories=Utility;Amusement;'* ]]
+          source "$QA_TOOLS/common.sh"
+          cd "$QA_SOURCE"
+          run npm ci --no-audit --no-fund
+          run node "$QA_TOOLS/verify-source.cjs" after-npm-ci
+      - name: Require real POSIX watchdog integration RAN and PASS with zero skips
+        id: watchdog
+        run: |
+          source "$QA_TOOLS/common.sh"
+          cd "$QA_SOURCE"
+          watchdog_status=0
+          run node --test --test-reporter=tap tests/quit-watchdog.test.cjs > "$QA_EVIDENCE/quit-watchdog.tap" || watchdog_status=$?
+          cat > "$QA_TOOLS/assert-watchdog.cjs" <<'WATCHDOG'
+          const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+          const tap=fs.readFileSync(path.join(process.env.QA_EVIDENCE,'quit-watchdog.tap'),'utf8');
+          const name='real POSIX watchdog signal kills a stalled child and allows a normal child to exit';
+          const row=tap.split('\n').find(line=>new RegExp('^ok \\d+ - '+name+'(?:\\s|$)').test(line));
+          const receipt={integration:name,ran:!!row&&!/#\s*(?:SKIP|TODO)/i.test(row),result:'FAIL',skipped:Number(/^# skipped (\d+)$/m.exec(tap)?.[1]??-1),failed:Number(/^# fail (\d+)$/m.exec(tap)?.[1]??-1)};
+          try{assert.ok(receipt.ran,'Real POSIX integration did not RAN/PASS');assert.equal(receipt.skipped,0);assert.equal(receipt.failed,0);receipt.result='PASS';}catch(e){receipt.error=e.stack;process.exitCode=1;}
+          receipt.execution=receipt.ran?'RAN':'NOT_EXERCISED';
+          fs.writeFileSync(path.join(process.env.QA_EVIDENCE,'watchdog-integration.json'),JSON.stringify(receipt,null,2)+'\n');console.log(JSON.stringify(receipt));
+          WATCHDOG
+          run node "$QA_TOOLS/assert-watchdog.cjs" || watchdog_status=1
+          exit "$watchdog_status"
+      - name: Bind prepackaged runtime bytes to the approved frozen source
+        id: provenance
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          source "$QA_TOOLS/common.sh"
+          mkdir -p "$QA_SOURCE/build"
+          run ln -s "$QA_BUNDLE/prepackaged/MischiefPet-linux-$NATIVE_ARCH" "$QA_SOURCE/build/MischiefPet-linux-$NATIVE_ARCH"
+          cd "$QA_SOURCE"
+          run node tools/verify-package-source.cjs
+          run cp "$QA_SOURCE/build/package-source-linux-$NATIVE_ARCH.json" "$QA_EVIDENCE/package-source.json"
+          node -e 'const assert=require("node:assert/strict"),r=require(process.argv[1]);assert.equal(r.result,"PASS");assert.ok(r.files.length>0);assert.equal(r.platform,"linux");assert.equal(r.arch,process.env.NATIVE_ARCH)' "$QA_EVIDENCE/package-source.json"
+      - name: Build only the matching native Debian package from prepackaged bytes
+        id: packages
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.provenance.outcome == 'success' }}
+        run: |
+          source "$QA_TOOLS/common.sh"
+          run node "$QA_SOURCE/tools/package-linux-deb.cjs" "$QA_BUNDLE/prepackaged/MischiefPet-linux-$NATIVE_ARCH" "$NATIVE_ARCH" "$QA_EVIDENCE/packages" "$QA_BUNDLE/icon.png"
+          new="$QA_EVIDENCE/packages/mischief-pet_0.5.1_$DEBIAN_ARCH.deb"
+          old="$QA_BUNDLE/old-debs/mischief-pet_0.5.0_$DEBIAN_ARCH.deb"
+          run sha256sum "$new" "$old" "$QA_BUNDLE/icon.png" "$QA_BUNDLE/prepackaged/MischiefPet-linux-$NATIVE_ARCH/resources/app.asar" > "$QA_EVIDENCE/package-input-sha256.txt"
+          for package in "$old" "$new"; do
+            run dpkg-deb --field "$package" Package Version Architecture
+            run dpkg-deb -I "$package"
+            run dpkg-deb -c "$package"
+          done
+          run dpkg-deb -e "$new" "$QA_EVIDENCE/control-$DEBIAN_ARCH"
+          test "$(dpkg-deb --field "$new" Package)" = mischief-pet
+          test "$(dpkg-deb --field "$new" Version)" = "$EXPECTED_VERSION"
+          test "$(dpkg-deb --field "$new" Architecture)" = "$DEBIAN_ARCH"
+      - name: Export candidate bytes only to the checked private QA draft
+        id: export
+        if: ${{ !cancelled() && steps.packages.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source "$QA_TOOLS/common.sh"
+          run gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json tagName,isDraft --jq '{tagName: .tagName, isDraft: .isDraft}' > "$QA_EVIDENCE/draft-before-export.json"
+          node -e 'const assert=require("node:assert/strict"),r=require(process.argv[1]);assert.equal(r.isDraft,true);assert.equal(r.tagName,process.env.RELEASE_TAG)' "$QA_EVIDENCE/draft-before-export.json"
+          run gh release upload "$RELEASE_TAG" "$QA_EVIDENCE/packages/mischief-pet_0.5.1_$DEBIAN_ARCH.deb" -R "$GITHUB_REPOSITORY" --clobber
+      - name: Install the new package for ordinary native sandbox and quit QA
+        id: install
+        if: ${{ !cancelled() && steps.packages.outcome == 'success' && steps.desktop.outcome == 'success' }}
+        run: |
+          source "$QA_TOOLS/common.sh"
+          run bash "$QA_TOOLS/clean-package.sh"
+          run sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y "$QA_EVIDENCE/packages/mischief-pet_0.5.1_$DEBIAN_ARCH.deb"
+          run stat -c '%U:%G %a %n' /opt/mischief-pet/chrome-sandbox
+          test "$(stat -c '%u:%g:%a' /opt/mischief-pet/chrome-sandbox)" = 0:0:4755
+          run cat /etc/apparmor.d/MischiefPet /usr/share/applications/MischiefPet.desktop
+          run update-alternatives --query MischiefPet
+          run sudo -n aa-status
+          run sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
-      - name: Run native installed x64 app with the Chromium sandbox enabled
+      - name: Run the existing eight native Chromium sandbox checks
+        id: sandbox
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
-          xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp' bash "$RUNNER_TEMP/qa-tools/x11-session.sh" node "$RUNNER_TEMP/qa-tools/linux-sandbox-qa.cjs" '/opt/Mischief Pet/MischiefPet' "$RUNNER_TEMP/qa-artifacts/runtime" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/sandboxed-qa.log"
-      - name: Remove installed package and verify system integration cleanup
-        if: always()
+          source "$QA_TOOLS/common.sh"
+          # Existing helper has no expected-version argument or hardcoded version.
+          # The quit phase below independently enforces installed version 0.5.1.
+          session node "$QA_SOURCE/tools/linux-sandbox-qa.cjs" /opt/mischief-pet/MischiefPet "$QA_EVIDENCE/sandbox"
+          cat > "$QA_TOOLS/assert-sandbox.cjs" <<'SANDBOX'
+          const assert=require('node:assert/strict'),r=require(process.env.QA_EVIDENCE+'/sandbox/qa.json');
+          assert.equal(r.result,'PASS_SANDBOXED');assert.equal(r.checks.length,8);assert.ok(r.checks.every(c=>c.result==='PASS'));console.log(JSON.stringify({result:r.result,native_checks:r.checks.length}));
+          SANDBOX
+          run node "$QA_TOOLS/assert-sandbox.cjs"
+      - name: Run five installed whole-tree quits and immediate same-profile relaunches
+        id: quits
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
-          if [ "$(dpkg-query -W -f='${Status}' mischief-pet 2>/dev/null)" = 'install ok installed' ]; then sudo apt-get remove -y mischief-pet; fi
-          test ! -e '/opt/Mischief Pet/MischiefPet'
-          test ! -e /etc/apparmor.d/MischiefPet
-          test ! -e /usr/share/applications/MischiefPet.desktop
-          printf '%s\n' 'apt remove completed; executable, AppArmor profile and desktop entry absent' | tee "$RUNNER_TEMP/qa-artifacts/uninstall.txt"
-      - name: Upload installers and evidence only; never publish a release
-        if: always()
+          source "$QA_TOOLS/common.sh"
+          session node "$QA_SOURCE/tools/quit-qa-posix.cjs" /opt/mischief-pet/MischiefPet "$QA_EVIDENCE/quits" "$EXPECTED_VERSION"
+      - name: Exercise real Electron SIGALRM whole trees and immediate apt removal
+        id: watchdog-tree
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          source "$QA_TOOLS/common.sh"
+          session node "$QA_SOURCE/tools/quit-qa-posix.cjs" /opt/mischief-pet/MischiefPet "$QA_EVIDENCE/watchdog-tree" "$EXPECTED_VERSION" --watchdog-drill --remove-deb-after-watchdog
+      - name: Remove the ordinary installed package before the fresh upgrade phase
+        id: remove-ordinary
+        if: ${{ always() && steps.harness.outcome == 'success' }}
+        run: |
+          source "$QA_TOOLS/common.sh"
+          run bash "$QA_TOOLS/clean-package.sh"
+      - name: Fresh package phase for real 0.5.0 to 0.5.1 upgrade and save preservation
+        id: upgrade
+        if: ${{ !cancelled() && steps.packages.outcome == 'success' && steps.desktop.outcome == 'success' && steps.remove-ordinary.outcome == 'success' }}
+        run: |
+          source "$QA_TOOLS/common.sh"
+          run bash "$QA_TOOLS/clean-package.sh"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
+          session node "$QA_SOURCE/tools/linux-upgrade-suid-qa.cjs" upgrade --old-deb "$QA_BUNDLE/old-debs/mischief-pet_0.5.0_$DEBIAN_ARCH.deb" --new-deb "$QA_EVIDENCE/packages/mischief-pet_0.5.1_$DEBIAN_ARCH.deb" --old-version 0.5.0 --new-version 0.5.1 --cleanup remove --output "$QA_EVIDENCE/upgrade" --disposable-runner
+      - name: Ensure removal between upgrade and fresh SUID fallback phase
+        id: remove-upgrade
+        if: ${{ always() && steps.harness.outcome == 'success' }}
+        run: |
+          source "$QA_TOOLS/common.sh"
+          run bash "$QA_TOOLS/clean-package.sh"
+          run sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone
+      - name: Fresh package phase for genuinely denied userns and installed SUID fallback
+        id: suid
+        if: ${{ !cancelled() && steps.packages.outcome == 'success' && steps.desktop.outcome == 'success' && steps.remove-upgrade.outcome == 'success' }}
+        run: |
+          source "$QA_TOOLS/common.sh"
+          run bash "$QA_TOOLS/clean-package.sh"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
+          session node "$QA_SOURCE/tools/linux-upgrade-suid-qa.cjs" suid --new-deb "$QA_EVIDENCE/packages/mischief-pet_0.5.1_$DEBIAN_ARCH.deb" --new-version 0.5.1 --cleanup remove --output "$QA_EVIDENCE/suid" --disposable-runner
+      - name: Always remove package integration and restore original host sysctls
+        id: cleanup
+        if: ${{ always() && steps.harness.outcome == 'success' }}
+        run: |
+          source "$QA_TOOLS/common.sh"
+          # Run both cleanup operations even if either fails; never mask the failure.
+          cleanup_status=0
+          run bash "$QA_TOOLS/clean-package.sh" || cleanup_status=1
+          if test -f "$QA_EVIDENCE/host-original.json"; then
+            for key in kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone; do
+              original="$(node -e 'process.stdout.write(require(process.argv[1]).sysctls[process.argv[2]])' "$QA_EVIDENCE/host-original.json" "$key")"
+              run sudo -n sysctl -w "$key=$original" || cleanup_status=1
+              run sysctl "$key" || cleanup_status=1
+              test "$(sysctl -n "$key")" = "$original" || cleanup_status=1
+            done
+          fi
+          exit "$cleanup_status"
+      - name: Always record final acceptance, limits and exact evidence hashes
+        if: ${{ always() }}
+        env:
+          STEP_OUTCOMES: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mischief-qa/evidence"
+          cat > "$RUNNER_TEMP/mischief-qa/final-evidence.cjs" <<'FINAL'
+          'use strict';
+          const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process');
+          const root=path.join(process.env.RUNNER_TEMP,'mischief-qa'),evidence=path.join(root,'evidence');
+          const read=f=>{try{return JSON.parse(fs.readFileSync(path.join(evidence,f),'utf8'));}catch{return null;}};
+          const steps=JSON.parse(process.env.STEP_OUTCOMES),quits=read('quits/quit-qa.json'),drill=read('watchdog-tree/quit-qa.json'),upgrade=read('upgrade/qa.json'),suid=read('suid/qa.json');
+          const required=['harness','desktop','bundle','dependencies','watchdog','provenance','packages','export','install','sandbox','quits','watchdog-tree','remove-ordinary','upgrade','remove-upgrade','suid','cleanup'];
+          const checks=required.map(name=>({name,result:steps[name]?.outcome==='success'?'PASS':'FAIL',outcome:steps[name]?.outcome||'NOT_EXERCISED'}));
+          checks.push({name:'Five versioned quits and immediate relaunches',result:quits?.version==='0.5.1'&&quits.result==='PASS'&&quits.passed===5&&quits.runs?.length===5&&quits.runs.every(r=>r.result==='PASS'&&r.quit?.on_main_exit?.result==='PASS')?'PASS':'FAIL'});
+          checks.push({name:'Five genuine source-alarm SIGALRM whole trees and immediate apt removal',result:drill?.controlled_watchdog_drill===true&&drill.result==='PASS'&&drill.passed===5&&drill.runs?.length===5&&drill.runs.every(r=>r.quit?.signal==='SIGALRM'&&r.quit.whole_tree_exit_ms<=4000&&r.quit.on_main_exit?.result==='PASS')&&drill.runs[4].quit.on_main_exit?.kind==='IMMEDIATE_APT_REMOVE'&&drill.runs[4].quit.on_main_exit.removal?.exit_code===0?'PASS':'FAIL'});
+          for(const [name,r] of [['upgrade',upgrade],['suid',suid]])checks.push({name:name+' exercised checks and cleanup',result:r?.result==='PASS_EXERCISED_CHECKS'&&r.checks?.length>0&&r.checks.every(c=>c.result==='PASS')&&r.cleanup?.every(c=>!c.result||c.result==='PASS')?'PASS':'FAIL'});
+          const naturalRemoval=suid?.natural_sigalrm_removal||{result:'NOT_EXERCISED',reason:'SUID helper did not reach the conditional observation'};
+          const limits=[{name:'Natural installed-app SIGALRM quit/relaunch',result:quits?.natural_watchdog_branch_observed?'OBSERVED_SEE_RECEIPTS':'NOT_EXERCISED',reason:'Controlled will-quit stalls are disclosed separately from natural product hangs.'},{name:'Immediate apt removal after natural SIGALRM',...naturalRemoval},{name:'Desktop fidelity',result:'LIMITED',reason:'Native GitHub-hosted Ubuntu 24.04 Xvfb/Openbox, not physical desktop, Wayland, multimonitor or extended soak.'}];
+          const sysctls={};for(const key of ['kernel.apparmor_restrict_unprivileged_userns','kernel.unprivileged_userns_clone'])try{sysctls[key]=execFileSync('sysctl',['-n',key],{encoding:'utf8'}).trim();}catch(e){sysctls[key]={error:e.message};}
+          const result=checks.every(c=>c.result==='PASS')?'PASS_EXERCISED_CHECKS':'FAIL';
+          const receipt={finished_at:new Date().toISOString(),result,arch:process.env.NATIVE_ARCH,expected_version:'0.5.1',bundle_sha256:process.env.BUNDLE_SHA256,freeze_sha256:process.env.FREEZE_SHA256,checks,limitations:limits,final_sysctls:sysctls};
+          fs.writeFileSync(path.join(evidence,'final-acceptance.json'),JSON.stringify(receipt,null,2)+'\n');
+          const tools=path.join(root,'tools');if(fs.existsSync(tools))fs.cpSync(tools,path.join(evidence,'workflow-harness'),{recursive:true});
+          const hashes=[];function visit(dir){for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,entry.name);if(entry.isDirectory())visit(file);else if(entry.isFile())hashes.push({path:path.relative(evidence,file),bytes:fs.statSync(file).size,sha256:crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')});}}
+          visit(evidence);fs.writeFileSync(path.join(evidence,'evidence-sha256.json'),JSON.stringify({files:hashes},null,2)+'\n');
+          console.log(JSON.stringify(receipt,null,2));if(result==='FAIL')process.exitCode=1;
+          FINAL
+          node "$RUNNER_TEMP/mischief-qa/final-evidence.cjs"
+      - name: Upload receipts and screenshots only, never candidate application bytes
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: linux-deb-x64-${{ github.run_id }}
+          name: linux-051-${{ env.NATIVE_ARCH }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/qa-artifacts/
-            !${{ runner.temp }}/qa-artifacts/packages/*.deb
+            ${{ runner.temp }}/mischief-qa/evidence/
+            !${{ runner.temp }}/mischief-qa/evidence/packages/*.deb
           if-no-files-found: error
           retention-days: 7
   native-arm64:
     needs: native-x64
+    # Sequential even after an x64 QA failure, to preserve complete native evidence.
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
-    steps:
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux-deb-x64-${{ github.run_id }}
-          path: ${{ runner.temp }}/qa-input/
-      - name: Prepare native arm64 restricted-userns desktop
-        run: |
-          mkdir -p "$RUNNER_TEMP/qa-artifacts" "$RUNNER_TEMP/qa-tools"
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb openbox xcompmgr feh imagemagick apparmor libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 libatk-bridge2.0-0t64 libdrm2 libx11-6
-          test "$(uname -m)" = aarch64
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
-          { uname -a; cat /etc/os-release; sysctl kernel.apparmor_restrict_unprivileged_userns; sudo aa-status; } | tee "$RUNNER_TEMP/qa-artifacts/host-policy.txt"
-          cp "$RUNNER_TEMP/qa-input/linux-sandbox-qa.cjs" "$RUNNER_TEMP/qa-input/openbox.xml" "$RUNNER_TEMP/qa-input/x11-session.sh" "$RUNNER_TEMP/qa-input/wallpaper.png" "$RUNNER_TEMP/qa-tools/"
-          npm install --prefix "$RUNNER_TEMP/qa-tools" --no-audit --no-fund playwright@1.63.0
-      - name: Download private arm64 installer and verify cross-job identity
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          EXPECTED_SHA256: ${{ needs.native-x64.outputs.sha256_arm64 }}
-        run: |
-          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern 'mischief-pet_0.5.0_arm64.deb' --dir "$RUNNER_TEMP/qa-input/packages"
-          printf '%s  %s\n' "$EXPECTED_SHA256" "$RUNNER_TEMP/qa-input/packages/mischief-pet_0.5.0_arm64.deb" | sha256sum --check | tee "$RUNNER_TEMP/qa-artifacts/private-input-sha256.txt"
-      - name: Install arm64 Debian package and record actual sandbox policy
-        run: |
-          sha256sum "$RUNNER_TEMP/qa-input/packages/mischief-pet_0.5.0_arm64.deb" | tee "$RUNNER_TEMP/qa-artifacts/deb-sha256.txt"
-          sudo apt-get install -y "$RUNNER_TEMP/qa-input/packages/mischief-pet_0.5.0_arm64.deb" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/install.log"
-          { stat -c '%U:%G %a %n' '/opt/Mischief Pet/chrome-sandbox'; cat /etc/apparmor.d/MischiefPet; sudo aa-status; cat /usr/share/applications/MischiefPet.desktop; sysctl kernel.apparmor_restrict_unprivileged_userns; } | tee "$RUNNER_TEMP/qa-artifacts/installed-policy.txt"
-          test "$(stat -c '%u:%g:%a' '/opt/Mischief Pet/chrome-sandbox')" = 0:0:4755
-          desktop=$(cat /usr/share/applications/MischiefPet.desktop)
-          [[ "$desktop" == *'Categories=Utility;Amusement;'* ]]
-          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
-      - name: Run native installed arm64 app with the Chromium sandbox enabled
-        run: |
-          xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp' bash "$RUNNER_TEMP/qa-tools/x11-session.sh" node "$RUNNER_TEMP/qa-tools/linux-sandbox-qa.cjs" '/opt/Mischief Pet/MischiefPet' "$RUNNER_TEMP/qa-artifacts/runtime" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/sandboxed-qa.log"
-      - name: Remove installed arm64 package cleanly
-        if: always()
-        run: |
-          if [ "$(dpkg-query -W -f='${Status}' mischief-pet 2>/dev/null)" = 'install ok installed' ]; then sudo apt-get remove -y mischief-pet; fi
-          test ! -e '/opt/Mischief Pet/MischiefPet'
-          test ! -e /etc/apparmor.d/MischiefPet
-          test ! -e /usr/share/applications/MischiefPet.desktop
-          printf '%s\n' 'apt remove completed; executable, AppArmor profile and desktop entry absent' | tee "$RUNNER_TEMP/qa-artifacts/uninstall.txt"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: linux-deb-arm64-${{ github.run_id }}
-          path: ${{ runner.temp }}/qa-artifacts/
-          if-no-files-found: error
-          retention-days: 7
+    timeout-minutes: 45
+    env:
+      NATIVE_ARCH: arm64
+      DEBIAN_ARCH: arm64
+      KERNEL_ARCH: aarch64
+    steps: *native-steps
