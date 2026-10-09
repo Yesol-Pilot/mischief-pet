@@ -1,0 +1,171 @@
+name: Manual Linux x64 release QA
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Draft release holding the Linux x64 archive
+        required: true
+        type: string
+      asset_name:
+        description: Linux x64 tar.gz asset name
+        required: true
+        type: string
+      expected_sha256:
+        description: Expected SHA256 of the archive
+        required: true
+        type: string
+      capture_store_screenshots:
+        description: Capture real English and Korean store screenshots after QA
+        default: false
+        type: boolean
+permissions:
+  contents: write
+jobs:
+  native-x64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      ASSET_NAME: ${{ inputs.asset_name }}
+      EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+    steps:
+      - name: Install headless desktop runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb openbox xcompmgr feh imagemagick gnome-keyring libsecret-1-0 fonts-noto-cjk libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 libatk-bridge2.0-0t64 libdrm2 libx11-6
+          test "$(uname -m)" = x86_64
+      - name: Download private draft asset and verify identity
+        run: |
+          mkdir -p "$RUNNER_TEMP/qa-release" "$RUNNER_TEMP/qa-artifacts" "$RUNNER_TEMP/qa-tools"
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "$ASSET_NAME" --dir "$RUNNER_TEMP/qa-release"
+          [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "$EXPECTED_SHA256" "$RUNNER_TEMP/qa-release/$ASSET_NAME" | sha256sum --check | tee "$RUNNER_TEMP/qa-artifacts/archive-sha256.txt"
+          tar -xzf "$RUNNER_TEMP/qa-release/$ASSET_NAME" -C "$RUNNER_TEMP/qa-release"
+          test -x "$RUNNER_TEMP/qa-release/MischiefPet-linux-x64/MischiefPet"
+          printf '%s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_SHA" > "$RUNNER_TEMP/qa-artifacts/run-identity.txt"
+      - name: Prepare generic QA and actual-app capture tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/qa-tools" --no-audit --no-fund playwright@1.63.0
+          cat > "$RUNNER_TEMP/qa-tools/ports-qa.cjs" <<'NODE_QA'
+          'use strict';
+          // Explicit release smoke: a fresh profile, no owner save, app-owned screenshots only.
+          const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict'),crypto=require('node:crypto');
+          const {_electron}=require('playwright');
+          const target=path.resolve(process.argv[2]),output=path.resolve(process.argv[3]);
+          fs.mkdirSync(output,{recursive:true});
+          const temp=fs.mkdtempSync(path.join(os.tmpdir(),'mischief-ports-qa-'));
+          const receipt={started_at:new Date().toISOString(),platform:process.platform,arch:process.arch,target,profile:temp,checks:[],limitations:['Single current display only; no physical input, sleep, other Spaces, Wayland, multimonitor or long-duration soak.','Manager made visible with showInactive; automation never calls focus().','Perch capability and native bridge loading checked, not a real perch jump onto another application.'],screenshots:[]};
+          if(process.platform==='linux')receipt.limitations.push((process.env.GITHUB_ACTIONS?'GitHub-hosted Ubuntu Xvfb':'Docker Xvfb')+' only; launch uses --no-sandbox. Production Chromium sandbox and a physical Linux desktop are not verified.');
+          let app,pids=[],crashes=[];
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms)),hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+          const pass=(name,data)=>receipt.checks.push({name,result:'PASS',data});
+          async function capture(page,name){const file=path.join(output,name);await page.screenshot({path:file,omitBackground:true});receipt.screenshots.push({path:file,bytes:fs.statSync(file).size,sha256:hash(file)});}
+          (async()=>{
+           const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;
+           app=await _electron.launch({executablePath:target,chromiumSandbox:process.platform!=='linux',args:['--user-data-dir='+temp,...(process.platform==='linux'?['--no-sandbox']:[])],env,timeout:60000});
+           const pid=app.process().pid;receipt.pid=pid;
+           await app.firstWindow();let manager,pet;
+           const deadline=Date.now()+30000;
+           while(Date.now()<deadline){manager=app.windows().find(w=>w.url().endsWith('/index.html'));pet=app.windows().find(w=>w.url().endsWith('/overlay.html'));if(manager&&pet&&await pet.evaluate(()=>MischiefSprite.ready()).catch(()=>false))break;await sleep(100);}
+           assert.ok(manager&&pet,'manager and pet renderer required');await pet.waitForFunction(()=>MischiefSprite.ready());
+           app.on('window',page=>page.on('crash',()=>crashes.push(page.url())));for(const page of app.windows())page.on('crash',()=>crashes.push(page.url()));
+           const ws=await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().map(w=>({url:w.webContents.getURL(),visible:w.isVisible(),focusable:w.isFocusable(),bounds:w.getBounds()})));
+           assert.ok(ws.find(w=>w.url.endsWith('/overlay.html'))?.visible);pass('Process starts and visible pet renderer loads',ws);
+           const initial=await manager.evaluate(()=>petDesktop.getState());
+           assert.equal(initial.capabilities.windowOcclusion,true);assert.equal(initial.state.perch.available,true);pass('Native window-world bridge loads; perch is available',{capabilities:initial.capabilities,perch:initial.state.perch});
+           await capture(pet,'pet.png');
+           await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().endsWith('/index.html')).showInactive());
+           assert.equal(await manager.isVisible('body'),true);await capture(manager,'manager.png');pass('Manager opens without explicit focus',true);
+           const before=(await manager.evaluate(()=>petDesktop.getState())).state.foodCounts.salmon||0;
+           await manager.locator('#food').selectOption('salmon');await manager.locator('#feed-button').click();
+           await manager.waitForFunction(before=>petDesktop.getState().then(s=>(s.state.foodCounts.salmon||0)===before+1),before);
+           pass('Care action via manager UI increments salmon count',{before,after:(await manager.evaluate(()=>petDesktop.getState())).state.foodCounts.salmon});
+           const samples=[];for(let i=0;i<10;i++){samples.push(await pet.evaluate(()=>{const c=document.getElementById('pet');return c.toDataURL();}));await sleep(180);}
+           assert.ok(new Set(samples).size>1);pass('Pet animation produces changing rendered frames',{distinctFrames:new Set(samples).size,sampleCount:samples.length});
+           await sleep(30000);assert.equal(app.process().exitCode,null);assert.deepEqual(crashes,[]);
+           const final=await manager.evaluate(()=>petDesktop.getState());assert.ok(final.state.time>initial.state.time);pass('Renderer responsive and no crash over 30 seconds',{initialTime:initial.state.time,finalTime:final.state.time,crashes});
+           await capture(manager,'manager-after-care.png');
+           if(process.env.MISCHIEF_QA_DISPLAY_CAPTURE==='1'){const file=path.join(output,'desktop.png'),args=['-display',process.env.DISPLAY,'-window','root',file];require('node:child_process').execFileSync('import',args);receipt.display_capture={command:['import',...args],path:file,bytes:fs.statSync(file).size,sha256:hash(file)};}
+           pids=await app.evaluate(({app})=>app.getAppMetrics().map(p=>p.pid));pids.push(pid);
+           await app.close();app=null;await sleep(1500);
+           const leftovers=pids.filter(pid=>{try{process.kill(pid,0);return true;}catch{return false;}});assert.deepEqual(leftovers,[]);pass('Clean exit leaves no application processes',{pids,leftovers});
+           receipt.result='PASS_SCOPED';
+          })().catch(e=>{receipt.result='FAIL';receipt.error=e.stack;process.exitCode=1;}).finally(async()=>{
+           if(app)await app.close().catch(()=>{});
+           fs.rmSync(temp,{recursive:true,force:true});receipt.finished_at=new Date().toISOString();
+           fs.writeFileSync(path.join(output,'qa.json'),JSON.stringify(receipt,null,2)+'\n');console.log(JSON.stringify({result:receipt.result,checks:receipt.checks,error:receipt.error},null,2));
+          });
+          NODE_QA
+          cat > "$RUNNER_TEMP/qa-tools/screenshots-store.cjs" <<'NODE_STORE'
+          'use strict';
+          // Whole-display captures of the real packaged app. Wallpaper and WM are outside the app.
+          const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto'),assert=require('node:assert/strict');
+          const {spawnSync,spawn}=require('node:child_process'),{_electron}=require('playwright');
+          const target=path.resolve(process.argv[2]),out=path.resolve(process.argv[3]),locale=process.argv[4],wallpaper=path.resolve(process.argv[5]);
+          if(!['en','ko'].includes(locale))throw Error('Locale must be en or ko');fs.mkdirSync(out,{recursive:true});
+          const profile=fs.mkdtempSync(path.join(os.tmpdir(),'mischief-store-'));
+          const receipt={version:'0.5.0',locale,platform:process.platform,arch:process.arch,display:process.env.DISPLAY,resolution:'1920x1080',target,profile,commands:[],screenshots:[],limitations:['Real Linux x64 app on GitHub-hosted Ubuntu Xvfb, not Windows/macOS captures.','--no-sandbox headless QA; no app source, DOM, entitlement or renderer state is mocked.']};
+          let app,compositor,manager;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          function command(bin,args){const p=spawnSync(bin,args,{encoding:'utf8'});receipt.commands.push({command:[bin,...args],exit_code:p.status,stdout:p.stdout,stderr:p.stderr});if(p.status!==0)throw Error(`${bin}: ${p.stderr}`);return p.stdout;}
+          const state=async()=>manager.evaluate(()=>petDesktop.getState());
+          const show=async()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().endsWith('/index.html')).showInactive());
+          const hide=async()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().endsWith('/index.html')).hide());
+          async function capture(name,trigger){await sleep(180);const before=await state(),file=path.join(out,name);command('import',['-display',process.env.DISPLAY,'-window','root',file]);assert.equal(command('identify',['-format','%wx%h',file]),'1920x1080');receipt.screenshots.push({path:file,sha256:crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),bytes:fs.statSync(file).size,trigger,state:before.state,windows:await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().map(w=>({url:w.webContents.getURL(),visible:w.isVisible(),bounds:w.getBounds()})))});}
+          (async()=>{
+           command('feh',['--bg-fill',wallpaper]);compositor=spawn('xcompmgr',['-n'],{stdio:'ignore'});receipt.commands.push({command:['xcompmgr','-n'],pid:compositor.pid});await sleep(500);
+           const env={...process.env,LANG:'en_US.UTF-8',LC_ALL:'C.UTF-8',XDG_CURRENT_DESKTOP:'GNOME'};delete env.ELECTRON_RUN_AS_NODE;
+           const args=['--no-sandbox','--ozone-platform=x11','--password-store=gnome-libsecret','--user-data-dir='+profile];receipt.launch={command:[target,...args]};
+           app=await _electron.launch({executablePath:target,args,chromiumSandbox:false,env,timeout:60000});await app.firstWindow();
+           receipt.storage=await app.evaluate(({safeStorage})=>({available:safeStorage.isEncryptionAvailable(),backend:safeStorage.getSelectedStorageBackend()}));assert.equal(receipt.storage.available,true,'Real secure storage is required for a normal Plus view');
+           const deadline=Date.now()+30000;let pet;while(Date.now()<deadline){manager=app.windows().find(w=>w.url().endsWith('/index.html'));pet=app.windows().find(w=>w.url().endsWith('/overlay.html'));if(manager&&pet&&await pet.evaluate(()=>MischiefSprite.ready()).catch(()=>false))break;await sleep(100);}assert.ok(manager&&pet);await show();
+           await manager.locator('#tab-settings').click();await manager.locator('#language').selectOption(locale);await manager.waitForFunction(locale=>document.documentElement.lang===locale,locale);
+           await manager.locator('#pet-name').fill(locale==='en'?'Mocha':'모카');await manager.locator('#save-name').click();if(await manager.locator('#consent-decline').isVisible())await manager.locator('#consent-decline').click();
+           await manager.locator('[data-mode="daily"]').click();await manager.locator('#tab-care').click();await hide();
+           const end=Date.now()+120000;while(Date.now()<end){const s=await state();if(s.state.desktop.walking&&s.state.behavior.kind==='walk')break;await sleep(100);}assert.equal((await state()).state.desktop.walking,true);await capture('01-pet-walking.png','Daily mode through Settings UI; await natural walk');
+           await show();await manager.locator('#tab-settings').click();await manager.locator('[data-mode="focus"]').click();await hide();await sleep(400);assert.equal((await state()).state.behavior.kind,'sleep');await capture('02-pet-sleeping.png','Focus mode through real Settings UI; hide manager');
+           await show();await manager.locator('[data-mode="daily"]').click();await manager.locator('#tab-care').click();await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().endsWith('/index.html')).setBounds({x:140,y:35,width:1060,height:1000}));await sleep(400);await capture('03-manager-care.png','Real Care tab, normally decorated manager with desktop pet nearby');
+           await manager.locator('#tab-plus').click();await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().endsWith('/index.html')).webContents.setZoomFactor(.8));receipt.commands.push({action:'Real Electron manager view zoom80%; no DOM modifications'});await sleep(400);assert.equal((await state()).state.commerce.available,true);await capture('04-manager-plus.png','Real Plus tab: Focus Buddy, reminders, Window Perch; installed gnome_libsecret, no mocked license');
+           await manager.locator('#tab-care').click();await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().endsWith('/index.html')).webContents.setZoomFactor(1));await manager.locator('#food').selectOption('salmon');await manager.locator('#feed-button').click();assert.equal((await state()).state.behavior.kind,'eat');await capture('05-manager-feeding.png','Actual Feed salmon button; real manager portrait and nearby desktop pet eating');
+           const pids=await app.evaluate(({app})=>app.getAppMetrics().map(p=>p.pid));await app.close();app=null;await sleep(1200);receipt.leftover_pids=pids.filter(pid=>{try{process.kill(pid,0);return true;}catch{return false;}});assert.deepEqual(receipt.leftover_pids,[]);receipt.result='CAPTURED';
+          })().catch(e=>{receipt.result='FAIL';receipt.error=e.stack;process.exitCode=1;}).finally(async()=>{if(app)await app.close().catch(()=>{});if(compositor)compositor.kill();fs.rmSync(profile,{recursive:true,force:true});receipt.finished_at=new Date().toISOString();fs.writeFileSync(path.join(out,'screenshots.json'),JSON.stringify(receipt,null,2)+'\n');console.log(JSON.stringify({result:receipt.result,locale,screenshots:receipt.screenshots.map(({path,bytes,sha256})=>({path,bytes,sha256})),error:receipt.error},null,2));});
+          NODE_STORE
+          cat > "$RUNNER_TEMP/qa-tools/openbox.xml" <<'WM_CONFIG'
+          <?xml version="1.0"?><openbox_config xmlns="http://openbox.org/3.4/rc"><theme><name>Onyx</name><titleLayout>NLIMC</titleLayout><font place="ActiveWindow"><name>Sans</name><size>11</size><weight>Bold</weight></font><font place="InactiveWindow"><name>Sans</name><size>11</size></font></theme><focus><focusNew>no</focusNew><followMouse>no</followMouse></focus><desktops><number>1</number></desktops></openbox_config>
+          WM_CONFIG
+      - name: Run native x64 renderer and clean-exit QA first
+        env:
+          MISCHIEF_QA_DISPLAY_CAPTURE: '1'
+        run: |
+          xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp' bash -euo pipefail -c '
+            openbox --config "$RUNNER_TEMP/qa-tools/openbox.xml" & wm=$!
+            trap "kill $wm 2>/dev/null || true" EXIT
+            sleep 1
+            node "$RUNNER_TEMP/qa-tools/ports-qa.cjs" "$RUNNER_TEMP/qa-release/MischiefPet-linux-x64/MischiefPet" "$RUNNER_TEMP/qa-artifacts/runtime" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/native-qa.log"
+          '
+      - name: Capture genuine store screenshots after runtime QA
+        if: ${{ inputs.capture_store_screenshots }}
+        run: |
+          convert -size 1920x1080 radial-gradient:'#F6F2E9-#AECBD4' "$RUNNER_TEMP/qa-artifacts/wallpaper.png"
+          identify "$RUNNER_TEMP/qa-artifacts/wallpaper.png" | tee "$RUNNER_TEMP/qa-artifacts/wallpaper-generation.txt"
+          printf '%s\n' "convert -size 1920x1080 radial-gradient:'#F6F2E9-#AECBD4' wallpaper.png" >> "$RUNNER_TEMP/qa-artifacts/wallpaper-generation.txt"
+          dbus-run-session -- bash -euo pipefail -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            xvfb-run -a -s "-screen 0 1920x1080x24 -nolisten tcp" bash -euo pipefail -c '''
+              openbox --config "$RUNNER_TEMP/qa-tools/openbox.xml" & wm=$!
+              trap "kill $wm 2>/dev/null || true" EXIT
+              sleep 1
+              for locale in en ko; do
+                node "$RUNNER_TEMP/qa-tools/screenshots-store.cjs" "$RUNNER_TEMP/qa-release/MischiefPet-linux-x64/MischiefPet" "$RUNNER_TEMP/qa-artifacts/screenshots-store/$locale" "$locale" "$RUNNER_TEMP/qa-artifacts/wallpaper.png" 2>&1 | tee "$RUNNER_TEMP/qa-artifacts/store-$locale.log"
+              done
+            '''
+          '
+      - name: Upload QA evidence only (never publish)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-qa-${{ github.run_id }}
+          path: ${{ runner.temp }}/qa-artifacts/
+          if-no-files-found: error
+          retention-days: 7
