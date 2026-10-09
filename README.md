@@ -1,6 +1,7 @@
 # Mischief Pet
 
 A little companion for your desktop — a desktop cat for **Windows, macOS and Linux (beta)** by **Neo Genesis** that roams, peeks and naps beside your work. Feed, pet and name your friend. No app account; pet saves stay on your device.
+![Genuine Mischief Pet 0.5.0 footage recorded on a Linux desktop](docs/demo.gif)
 
 **Free:** core care, movement, settings, instant hide (**Ctrl+Shift+H on Windows/Linux / ⌘+Shift+H on Mac**), reduced motion, and 3 Focus Buddy + 3 Window Perch trial uses. No forced startup. On Linux, Window Perch requires X11 (EWMH window manager with restacking, libX11, 100% display scaling / scale 1); not available on Wayland.
 
