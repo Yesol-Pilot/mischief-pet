@@ -90,6 +90,9 @@ jobs:
             assert.equal(metadata.version, '0.5.0');
             assert.ok(fs.existsSync(path.join(input, 'MischiefPet')));
             const before = sha256(archive), project = path.join(output, 'builder-project-' + arch);
+            // Private mkdtemp staging may be 0700; an installed root-owned app must be traversable.
+            const inputModeBefore = (fs.statSync(input).mode & 0o7777).toString(8);
+            fs.chmodSync(input, 0o755);
             fs.mkdirSync(project, { recursive: true });
             fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ ...metadata, homepage: 'https://mischiefpet.neogenesis.app', author: { name: 'Neo Genesis', email: 'help@neogenesis.app' } }, null, 2));
             const builderRoot = path.dirname(require.resolve('app-builder-lib/package.json'));
@@ -110,7 +113,7 @@ jobs:
             assert.equal(sha256(archive), before, 'Prepackaged ASAR must remain byte-identical');
             const files = result.filter(file => file.endsWith('.deb')).map(file => ({ path: file, sha256: sha256(file), bytes: fs.statSync(file).size }));
             assert.equal(files.length, 1);
-            fs.writeFileSync(path.join(output, `build-${debianArch}.json`), JSON.stringify({ version: metadata.version, arch, input, asar_sha256_before: before, asar_sha256_after: sha256(archive), electron_builder: require('electron-builder/package.json').version, sandbox_policy: 'Stock AppArmor userns profile and postinst loader; explicit root:root 4755 chrome-sandbox fallback', artifacts: files }, null, 2) + '\n');
+            fs.writeFileSync(path.join(output, `build-${debianArch}.json`), JSON.stringify({ version: metadata.version, arch, input, input_directory_mode_before: inputModeBefore, packaged_directory_mode: '755', asar_sha256_before: before, asar_sha256_after: sha256(archive), electron_builder: require('electron-builder/package.json').version, sandbox_policy: 'Stock AppArmor userns profile and postinst loader; explicit root:root 4755 chrome-sandbox fallback', artifacts: files }, null, 2) + '\n');
             fs.rmSync(project, { recursive: true, force: true });
             console.log(JSON.stringify(files, null, 2));
           })().catch(error => { console.error(error); process.exitCode = 1; });
