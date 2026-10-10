@@ -16,7 +16,7 @@ on:
         required: true
         type: string
 permissions:
-  contents: read
+  contents: write
   actions: read
 defaults:
   run:
