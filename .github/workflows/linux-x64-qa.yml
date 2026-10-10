@@ -191,7 +191,7 @@ jobs:
           node -e 'const fs=require("node:fs"),assert=require("node:assert/strict");for(const p of fs.readFileSync(process.argv[1],"utf8").trim().split("\n")){assert.ok(!p.startsWith("/")&&!p.split("/").includes(".."),p)}' "$QA_EVIDENCE/bundle-members.txt"
           run tar --no-same-owner -xzf "$QA_ROOT/download/$BUNDLE_ASSET" -C "$QA_BUNDLE"
           for arch in x64 arm64; do test -x "$QA_BUNDLE/prepackaged/MischiefPet-linux-$arch/MischiefPet"; test -f "$QA_BUNDLE/prepackaged/MischiefPet-linux-$arch/resources/app.asar"; done
-          for arch in amd64 arm64; do test -f "$QA_BUNDLE/old-debs/mischief-pet_0.5.0_$arch.deb"; done
+          for arch in amd64 arm64; do test -f "$QA_BUNDLE/old-debs/mischief-pet_0.5.1_$arch.deb"; done
           for dir in desktop src assets tools tests; do test -d "$QA_SOURCE/$dir"; done
           for file in package.json package-lock.json index.html source-freeze.json; do test -f "$QA_SOURCE/$file"; done
           test -f "$QA_BUNDLE/icon.png"
