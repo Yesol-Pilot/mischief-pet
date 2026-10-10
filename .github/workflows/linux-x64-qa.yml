@@ -1,8 +1,8 @@
-name: Manual Linux 0.5.1 native Debian QA
+name: Manual Linux 0.6.0 native Debian QA
 # Authorized operator stages one private draft bundle. This workflow never publishes.
 # Bundle root: prepackaged/MischiefPet-linux-{x64,arm64}, source/{desktop,src,
 # assets,tools,tests,package.json,package-lock.json,index.html,source-freeze.json},
-# old-debs/mischief-pet_0.5.0_{amd64,arm64}.deb, icon.png. No credentials.
+# old-debs/mischief-pet_0.5.1_{amd64,arm64}.deb, icon.png. No credentials.
 # Only exercised checks can pass. Natural hangs stay separate from disclosed
 # controlled real-kernel SIGALRM drills and mandatory POSIX unit integration.
 on:
@@ -20,6 +20,14 @@ on:
         description: Exact lowercase SHA256 of the QA bundle
         required: true
         type: string
+      freeze_sha256:
+        description: Exact SHA256 of the source-freeze manifest used by this run
+        required: true
+        type: string
+      expected_version:
+        description: Exact app version under test
+        required: true
+        type: string
 permissions:
   contents: write
   actions: read
@@ -30,8 +38,8 @@ env:
   RELEASE_TAG: ${{ inputs.release_tag }}
   BUNDLE_ASSET: ${{ inputs.bundle_asset }}
   BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
-  FREEZE_SHA256: cc50690bad5e342ad734fb3a43a0a48fa320ffbf2ab16f4732d873577bdf9285
-  EXPECTED_VERSION: 0.5.1
+  FREEZE_SHA256: ${{ inputs.freeze_sha256 }}
+  EXPECTED_VERSION: ${{ inputs.expected_version }}
   ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
   CI: 'true'
@@ -108,15 +116,15 @@ jobs:
           try{
             assert.equal(receipt.freeze_sha256,process.env.FREEZE_SHA256);
             const freeze=JSON.parse(fs.readFileSync(file,'utf8'));
-            assert.equal(freeze.version,'0.5.1');
+            assert.equal(freeze.version,process.env.EXPECTED_VERSION);
             assert.ok(Object.keys(freeze.files).length>0);
             for(const [relative,expected] of Object.entries(freeze.files)){
               assert.ok(!path.isAbsolute(relative)&&!relative.split(/[\\/]/).includes('..'));
-              const full=path.join(root,relative),actual=hash(full);
-              rows.push({path:relative,expected_sha256:expected,sha256:actual,result:actual===expected?'PASS':'FAIL'});
-              assert.equal(actual,expected,relative);
+              const full=path.join(root,relative),present=fs.existsSync(full)&&fs.statSync(full).isFile(),actual=present?hash(full):null,bytes=present?fs.statSync(full).size:null,expected_sha256=typeof expected==='string'?expected:expected?.sha256,expected_bytes=typeof expected==='object'?expected?.bytes:null;
+              rows.push({path:relative,expected_sha256,sha256:actual,expected_bytes,bytes,result:present&&actual===expected_sha256&&(expected_bytes===null||bytes===expected_bytes)?'PASS':'FAIL'});
+              assert.equal(rows.at(-1).result,'PASS',relative);
             }
-            assert.equal(JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version,'0.5.1');
+            assert.equal(JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version,process.env.EXPECTED_VERSION);
             receipt.result='PASS';
           }catch(e){receipt.error=e.stack;process.exitCode=1;}
           fs.writeFileSync(path.join(process.env.QA_EVIDENCE,'source-freeze-'+(process.argv[2]||'initial')+'.json'),JSON.stringify(receipt,null,2)+'\n');
@@ -233,8 +241,8 @@ jobs:
         run: |
           source "$QA_TOOLS/common.sh"
           run node "$QA_SOURCE/tools/package-linux-deb.cjs" "$QA_BUNDLE/prepackaged/MischiefPet-linux-$NATIVE_ARCH" "$NATIVE_ARCH" "$QA_EVIDENCE/packages" "$QA_BUNDLE/icon.png"
-          new="$QA_EVIDENCE/packages/mischief-pet_0.5.1_$DEBIAN_ARCH.deb"
-          old="$QA_BUNDLE/old-debs/mischief-pet_0.5.0_$DEBIAN_ARCH.deb"
+          new="$QA_EVIDENCE/packages/mischief-pet_${EXPECTED_VERSION}_$DEBIAN_ARCH.deb"
+          old="$QA_BUNDLE/old-debs/mischief-pet_0.5.1_$DEBIAN_ARCH.deb"
           run sha256sum "$new" "$old" "$QA_BUNDLE/icon.png" "$QA_BUNDLE/prepackaged/MischiefPet-linux-$NATIVE_ARCH/resources/app.asar" > "$QA_EVIDENCE/package-input-sha256.txt"
           for package in "$old" "$new"; do
             run dpkg-deb --field "$package" Package Version Architecture
@@ -254,14 +262,14 @@ jobs:
           source "$QA_TOOLS/common.sh"
           run gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json tagName,isDraft --jq '{tagName: .tagName, isDraft: .isDraft}' > "$QA_EVIDENCE/draft-before-export.json"
           node -e 'const assert=require("node:assert/strict"),r=require(process.argv[1]);assert.equal(r.isDraft,true);assert.equal(r.tagName,process.env.RELEASE_TAG)' "$QA_EVIDENCE/draft-before-export.json"
-          run gh release upload "$RELEASE_TAG" "$QA_EVIDENCE/packages/mischief-pet_0.5.1_$DEBIAN_ARCH.deb" -R "$GITHUB_REPOSITORY" --clobber
+          run gh release upload "$RELEASE_TAG" "$QA_EVIDENCE/packages/mischief-pet_${EXPECTED_VERSION}_$DEBIAN_ARCH.deb" -R "$GITHUB_REPOSITORY" --clobber
       - name: Install the new package for ordinary native sandbox and quit QA
         id: install
         if: ${{ !cancelled() && steps.packages.outcome == 'success' && steps.desktop.outcome == 'success' }}
         run: |
           source "$QA_TOOLS/common.sh"
           run bash "$QA_TOOLS/clean-package.sh"
-          run sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y "$QA_EVIDENCE/packages/mischief-pet_0.5.1_$DEBIAN_ARCH.deb"
+          run sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y "$QA_EVIDENCE/packages/mischief-pet_${EXPECTED_VERSION}_$DEBIAN_ARCH.deb"
           run stat -c '%U:%G %a %n' /opt/mischief-pet/chrome-sandbox
           test "$(stat -c '%u:%g:%a' /opt/mischief-pet/chrome-sandbox)" = 0:0:4755
           run cat /etc/apparmor.d/MischiefPet /usr/share/applications/MischiefPet.desktop
@@ -275,7 +283,7 @@ jobs:
         run: |
           source "$QA_TOOLS/common.sh"
           # Existing helper has no expected-version argument or hardcoded version.
-          # The quit phase below independently enforces installed version 0.5.1.
+          # The quit phase below independently enforces the installed expected version.
           session node "$QA_SOURCE/tools/linux-sandbox-qa.cjs" /opt/mischief-pet/MischiefPet "$QA_EVIDENCE/sandbox"
           cat > "$QA_TOOLS/assert-sandbox.cjs" <<'SANDBOX'
           const assert=require('node:assert/strict'),r=require(process.env.QA_EVIDENCE+'/sandbox/qa.json');
@@ -300,14 +308,14 @@ jobs:
         run: |
           source "$QA_TOOLS/common.sh"
           run bash "$QA_TOOLS/clean-package.sh"
-      - name: Fresh package phase for real 0.5.0 to 0.5.1 upgrade and save preservation
+      - name: Fresh package phase for real 0.5.1 to 0.6.0 upgrade and save preservation
         id: upgrade
         if: ${{ !cancelled() && steps.packages.outcome == 'success' && steps.desktop.outcome == 'success' && steps.remove-ordinary.outcome == 'success' }}
         run: |
           source "$QA_TOOLS/common.sh"
           run bash "$QA_TOOLS/clean-package.sh"
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
-          session node "$QA_SOURCE/tools/linux-upgrade-suid-qa.cjs" upgrade --old-deb "$QA_BUNDLE/old-debs/mischief-pet_0.5.0_$DEBIAN_ARCH.deb" --new-deb "$QA_EVIDENCE/packages/mischief-pet_0.5.1_$DEBIAN_ARCH.deb" --old-version 0.5.0 --new-version 0.5.1 --cleanup remove --output "$QA_EVIDENCE/upgrade" --disposable-runner
+          session node "$QA_SOURCE/tools/linux-upgrade-suid-qa.cjs" upgrade --old-deb "$QA_BUNDLE/old-debs/mischief-pet_0.5.1_$DEBIAN_ARCH.deb" --new-deb "$QA_EVIDENCE/packages/mischief-pet_${EXPECTED_VERSION}_$DEBIAN_ARCH.deb" --old-version 0.5.1 --new-version "$EXPECTED_VERSION" --cleanup remove --output "$QA_EVIDENCE/upgrade" --disposable-runner
       - name: Ensure removal between upgrade and fresh SUID fallback phase
         id: remove-upgrade
         if: ${{ always() && steps.harness.outcome == 'success' }}
@@ -322,7 +330,7 @@ jobs:
           source "$QA_TOOLS/common.sh"
           run bash "$QA_TOOLS/clean-package.sh"
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
-          session node "$QA_SOURCE/tools/linux-upgrade-suid-qa.cjs" suid --new-deb "$QA_EVIDENCE/packages/mischief-pet_0.5.1_$DEBIAN_ARCH.deb" --new-version 0.5.1 --cleanup remove --output "$QA_EVIDENCE/suid" --disposable-runner
+          session node "$QA_SOURCE/tools/linux-upgrade-suid-qa.cjs" suid --new-deb "$QA_EVIDENCE/packages/mischief-pet_${EXPECTED_VERSION}_$DEBIAN_ARCH.deb" --new-version "$EXPECTED_VERSION" --cleanup remove --output "$QA_EVIDENCE/suid" --disposable-runner
       - name: Always remove package integration and restore original host sysctls
         id: cleanup
         if: ${{ always() && steps.harness.outcome == 'success' }}
@@ -355,14 +363,14 @@ jobs:
           const steps=JSON.parse(process.env.STEP_OUTCOMES),quits=read('quits/quit-qa.json'),drill=read('watchdog-tree/quit-qa.json'),upgrade=read('upgrade/qa.json'),suid=read('suid/qa.json');
           const required=['harness','desktop','bundle','dependencies','watchdog','provenance','packages','export','install','sandbox','quits','watchdog-tree','remove-ordinary','upgrade','remove-upgrade','suid','cleanup'];
           const checks=required.map(name=>({name,result:steps[name]?.outcome==='success'?'PASS':'FAIL',outcome:steps[name]?.outcome||'NOT_EXERCISED'}));
-          checks.push({name:'Five versioned quits and immediate relaunches',result:quits?.version==='0.5.1'&&quits.result==='PASS'&&quits.passed===5&&quits.runs?.length===5&&quits.runs.every(r=>r.result==='PASS'&&r.quit?.on_main_exit?.result==='PASS')?'PASS':'FAIL'});
+          checks.push({name:'Five versioned quits and immediate relaunches',result:quits?.version===process.env.EXPECTED_VERSION&&quits.result==='PASS'&&quits.passed===5&&quits.runs?.length===5&&quits.runs.every(r=>r.result==='PASS'&&r.quit?.on_main_exit?.result==='PASS')?'PASS':'FAIL'});
           checks.push({name:'Five genuine source-alarm SIGALRM whole trees and immediate apt removal',result:drill?.controlled_watchdog_drill===true&&drill.result==='PASS'&&drill.passed===5&&drill.runs?.length===5&&drill.runs.every(r=>r.quit?.signal==='SIGALRM'&&r.quit.whole_tree_exit_ms<=4000&&r.quit.on_main_exit?.result==='PASS')&&drill.runs[4].quit.on_main_exit?.kind==='IMMEDIATE_APT_REMOVE'&&drill.runs[4].quit.on_main_exit.removal?.exit_code===0?'PASS':'FAIL'});
           for(const [name,r] of [['upgrade',upgrade],['suid',suid]])checks.push({name:name+' exercised checks and cleanup',result:r?.result==='PASS_EXERCISED_CHECKS'&&r.checks?.length>0&&r.checks.every(c=>c.result==='PASS')&&r.cleanup?.every(c=>!c.result||c.result==='PASS')?'PASS':'FAIL'});
           const naturalRemoval=suid?.natural_sigalrm_removal||{result:'NOT_EXERCISED',reason:'SUID helper did not reach the conditional observation'};
           const limits=[{name:'Natural installed-app SIGALRM quit/relaunch',result:quits?.natural_watchdog_branch_observed?'OBSERVED_SEE_RECEIPTS':'NOT_EXERCISED',reason:'Controlled will-quit stalls are disclosed separately from natural product hangs.'},{name:'Immediate apt removal after natural SIGALRM',...naturalRemoval},{name:'Desktop fidelity',result:'LIMITED',reason:'Native GitHub-hosted Ubuntu 24.04 Xvfb/Openbox, not physical desktop, Wayland, multimonitor or extended soak.'}];
           const sysctls={};for(const key of ['kernel.apparmor_restrict_unprivileged_userns','kernel.unprivileged_userns_clone'])try{sysctls[key]=execFileSync('sysctl',['-n',key],{encoding:'utf8'}).trim();}catch(e){sysctls[key]={error:e.message};}
           const result=checks.every(c=>c.result==='PASS')?'PASS_EXERCISED_CHECKS':'FAIL';
-          const receipt={finished_at:new Date().toISOString(),result,arch:process.env.NATIVE_ARCH,expected_version:'0.5.1',bundle_sha256:process.env.BUNDLE_SHA256,freeze_sha256:process.env.FREEZE_SHA256,checks,limitations:limits,final_sysctls:sysctls};
+          const receipt={finished_at:new Date().toISOString(),result,arch:process.env.NATIVE_ARCH,expected_version:process.env.EXPECTED_VERSION,bundle_sha256:process.env.BUNDLE_SHA256,freeze_sha256:process.env.FREEZE_SHA256,checks,limitations:limits,final_sysctls:sysctls};
           fs.writeFileSync(path.join(evidence,'final-acceptance.json'),JSON.stringify(receipt,null,2)+'\n');
           const tools=path.join(root,'tools');if(fs.existsSync(tools))fs.cpSync(tools,path.join(evidence,'workflow-harness'),{recursive:true});
           const hashes=[];function visit(dir){for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,entry.name);if(entry.isDirectory())visit(file);else if(entry.isFile())hashes.push({path:path.relative(evidence,file),bytes:fs.statSync(file).size,sha256:crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')});}}
