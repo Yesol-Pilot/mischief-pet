@@ -438,7 +438,12 @@ namespace MischiefQa {
                     Click-Element (Reveal-UI $managerHandle '^(No thanks|괜찮아요, 보내지 않을게요)$')
                     Click-Element (Reveal-UI $managerHandle '^(Start together|Save preferences|함께 시작하기|설정 저장하기)$')
                     $prefsFile=Join-Path $packageData 'LocalCache\Roaming\neogenesis-mischief-pet\preferences-v1.json'
-                    Wait-For { (Test-Path $prefsFile) -and (Get-Content $prefsFile -Raw | ConvertFrom-Json).onboardingVersion -eq '0.6.0' } 15
+                    Wait-For {
+                        if(-not (Test-Path $prefsFile)){return $false}
+                        $saved=Get-Content $prefsFile -Raw | ConvertFrom-Json
+                        $version=$saved.PSObject.Properties['onboardingVersion']
+                        return $null -ne $version -and $version.Value -eq '0.6.0'
+                    } 15
                     Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList $target | Out-Null
                     Wait-For { @(App-Windows | Where-Object { $_.Visible -and $_.Title -like 'Mischief Pet —*' }).Count -eq 1 } 30
                     $script:managerHandle=@(App-Windows | Where-Object { $_.Visible -and $_.Title -like 'Mischief Pet —*' })[0].Handle
