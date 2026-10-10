@@ -502,6 +502,54 @@ jobs:
           '@
           $scriptPath = Join-Path $root 'qa-windows-appx.ps1'
           [IO.File]::WriteAllBytes($scriptPath, [Convert]::FromBase64String(($encoded -replace '\s','')))
+          $qa = [IO.File]::ReadAllText($scriptPath)
+          $qa = $qa.Replace(
+          @'
+                    $plus=Find-UI $managerHandle '^Plus$'; Click-Element $plus
+                    Start-Sleep -Seconds 2
+                    $key=Find-UI $managerHandle '^(License key|라이선스 키)$'
+                    $activate=Find-UI $managerHandle '^(Activate|활성화)$'
+          '@,
+          @'
+                    $plus=Wait-For { Find-UI $managerHandle '^(Plus|플러스)$' } 15
+                    Click-Element $plus
+                    Start-Sleep -Seconds 2
+                    $key=Wait-For { Find-UI $managerHandle '^(License key|라이선스 키)$' } 15
+                    $activate=Wait-For { Find-UI $managerHandle '^(Activate|활성화)$' } 15
+          '@)
+          $qa = $qa.Replace(
+          @'
+            Wait-For { @(Get-ChildItem -LiteralPath $packageData -Filter pet-v1.json -File -Recurse -ErrorAction SilentlyContinue).Count -gt 0 -or (Test-Path -LiteralPath $plainSave) } 20
+            Assert-True (-not (Test-Path -LiteralPath $plainSave)) 'Unvirtualized appdata created: packaged isolation FAILED'
+            $saves=@(Get-ChildItem -LiteralPath $packageData -Filter pet-v1.json -File -Recurse)
+            Assert-True ($saves.Count -eq 1) 'Expected exactly one actual package-scoped pet save'
+            $directory=$saves[0].Directory.FullName
+            Assert-True ($saves[0].Directory.Name -ceq 'neogenesis-mischief-pet') 'Unexpected appdata directory name'
+          '@,
+          @'
+            $directory=Join-Path $packageData 'LocalCache\Roaming\neogenesis-mischief-pet'
+            Wait-For { Test-Path -LiteralPath $directory -PathType Container } 20
+            Assert-True (Test-Path -LiteralPath $directory -PathType Container) 'Expected package-scoped appdata directory was not created'
+            Assert-True (-not (Test-Path -LiteralPath $plainSave)) 'Unvirtualized appdata created: packaged isolation FAILED'
+            $saves=@(Get-ChildItem -LiteralPath $directory -Filter pet-v1.json -File -ErrorAction SilentlyContinue)
+          '@)
+          $qa = $qa.Replace(
+          @'
+          function Save-Inventory([string]$Directory) {
+              return @(Get-ChildItem -LiteralPath $Directory -File -Recurse | ForEach-Object { [ordered]@{ relative_path=[IO.Path]::GetRelativePath($Directory,$_.FullName); bytes=$_.Length; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
+          }
+          '@,
+          @'
+          function Save-Inventory([string]$Directory) {
+              return @(Get-ChildItem -LiteralPath $Directory -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                  try { [ordered]@{ relative_path=[IO.Path]::GetRelativePath($Directory,$_.FullName); bytes=$_.Length; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } }
+                  catch { [ordered]@{ relative_path=[IO.Path]::GetRelativePath($Directory,$_.FullName); unreadable=$true; reason='File was still locked during QA inventory' } }
+              })
+          }
+          '@)
+          $qa = $qa.Replace('$overall=$xml.SelectSingleNode(''//*[local-name()="OVERALL_RESULT"]'')', '$overall=$xml.DocumentElement.GetAttribute(''OVERALL_RESULT'')')
+          if ($qa -notmatch 'DocumentElement\.GetAttribute') { throw 'Embedded QA harness patch did not apply' }
+          [IO.File]::WriteAllText($scriptPath, $qa, [Text.UTF8Encoding]::new($false))
           "QA_SCRIPT=$scriptPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "QA_EVIDENCE=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Run actual signed sideload QA
