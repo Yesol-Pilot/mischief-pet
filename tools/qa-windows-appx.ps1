@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $identity = 'NeoGenesis.MischiefPet.SideloadTest'
 $subject = 'CN=MischiefPetSideloadTest'
-$asarHash = '6a0f60d5c24973a2d51b861baaafc393c022daacfa427dd5d987c63ad2bd4514'
+$asarHash = 'aae60fa894a849a3c1a629f695e89615dcd636e278baee515fe4acd3986a36c4'
 $nativeHash = 'dcb3048bba5cf115aa19172f091cf005f8be9d39fd42dfb5ea25103318784a44'
 $asarRelative = 'app\resources\app.asar'
 $nativeRelative = 'app\resources\app.asar.unpacked\node_modules\@koromix\koffi-win32-x64\win32_x64\koffi.node'
