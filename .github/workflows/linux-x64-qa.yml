@@ -277,7 +277,7 @@ jobs:
           run sudo -n aa-status
           run sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
-      - name: Run the existing eight native Chromium sandbox checks
+      - name: Run the nine native Chromium sandbox and autostart checks
         id: sandbox
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
@@ -287,7 +287,7 @@ jobs:
           session node "$QA_SOURCE/tools/linux-sandbox-qa.cjs" /opt/mischief-pet/MischiefPet "$QA_EVIDENCE/sandbox"
           cat > "$QA_TOOLS/assert-sandbox.cjs" <<'SANDBOX'
           const assert=require('node:assert/strict'),r=require(process.env.QA_EVIDENCE+'/sandbox/qa.json');
-          assert.equal(r.result,'PASS_SANDBOXED');assert.equal(r.checks.length,8);assert.ok(r.checks.every(c=>c.result==='PASS'));console.log(JSON.stringify({result:r.result,native_checks:r.checks.length}));
+          assert.equal(r.result,'PASS_SANDBOXED');assert.equal(r.checks.length,9);assert.ok(r.checks.every(c=>c.result==='PASS'));console.log(JSON.stringify({result:r.result,native_checks:r.checks.length}));
           SANDBOX
           run node "$QA_TOOLS/assert-sandbox.cjs"
       - name: Run five installed whole-tree quits and immediate same-profile relaunches
