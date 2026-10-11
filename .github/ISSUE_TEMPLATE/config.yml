@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "Private support: mischiefpet@neogenesis.app / 비공개 지원 메일"
+    url: https://mischiefpet.neogenesis.app/en/
+    about: "Email mischiefpet@neogenesis.app (also at the bottom of the website). Include the app version, OS and chip, display scaling and the steps to reproduce. Never post or send a full license key, password, payment details or screenshots of private content. / mischiefpet@neogenesis.app 로 메일 주세요(웹사이트 맨 아래에도 있습니다). 앱 버전, OS·칩, 화면 배율, 재현 순서를 적어 주세요. 라이선스 키 전체·비밀번호·결제 정보·개인 화면 캡처는 올리거나 보내지 마세요."
+  - name: Install help, SmartScreen and FAQ / 설치 도움말·FAQ
+    url: https://mischiefpet.neogenesis.app/#faq
+    about: "Installing on Windows, macOS and Linux (beta), the Windows SmartScreen warning, updating and removing. / Windows·macOS·Linux(베타) 설치, Windows SmartScreen 경고, 업데이트와 제거 안내."
+  - name: Plus refunds / Plus 환불
+    url: https://mischiefpet.neogenesis.app/en/refund/
+    about: "Request a refund from your Gumroad receipt or purchase page within 14 days. / 구매 후 14일 이내 Gumroad 영수증·구매 페이지에서 요청하세요."
